@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "luminal-open-api-sdk"
+version = "1.0.0"
+description = "Standalone Python 3 SDK for Luminal Open API controllers and webhooks."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["structlog>=24"]
+
+[tool.unittest]
+start-directory = "tests"

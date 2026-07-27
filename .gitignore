@@ -1,0 +1,10 @@
+# Local Python tooling and build outputs
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+*.egg-info/
+uv.lock
+.idea
+*.log
