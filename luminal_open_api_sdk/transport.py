@@ -29,7 +29,9 @@ _ERROR_BODY_TRUNCATION_MARKER = "...[truncated]"
 _DEFAULT_USER_AGENT = "luminal-open-api-python-sdk/1.0"
 _HTTP_HEADER_NAME_CHARS = frozenset("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 _SENSITIVE_LOG_HEADERS = frozenset({"authorization", "cookie", "set-cookie", "sign"})
-_SENSITIVE_LOG_BODY_KEYS = frozenset({"accesstoken", "refreshtoken", "appsecret", "cvv", "cardno", "cardnumber"})
+_SENSITIVE_LOG_BODY_KEYS = frozenset(
+    {"accesstoken", "refreshtoken", "appsecret", "cvv", "cardno", "cardnumber", "verifycode"}
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -97,7 +99,7 @@ def to_wire(value: Any, annotation: Any = Any, *, for_signature: bool = False) -
                 for_signature=for_signature,
             )
             for field in fields(value)
-            if getattr(value, field.name) is not None
+            if not field.metadata.get("wire_ignore") and getattr(value, field.name) is not None
         }
     if isinstance(value, Enum):
         return to_wire(value.value, for_signature=for_signature)
@@ -201,6 +203,7 @@ class HttpTransport:
         accept_language: str = "en",
         retry_unauthorized: int = 0,
         log_http: bool = True,
+        log_raw_http: bool = False,
         logger: Any | None = None,
     ) -> None:
         self.base_url = self._validate_base_url(base_url)
@@ -230,6 +233,7 @@ class HttpTransport:
             raise ValueError("retry_unauthorized must be a non-negative integer")
         self.retry_unauthorized = retry_unauthorized
         self.log_http = bool(log_http)
+        self.log_raw_http = bool(log_raw_http)
         if logger is not None and not callable(getattr(logger, "info", None)):
             raise TypeError("logger must provide an info method")
         self.logger = _LOGGER if logger is None else logger
@@ -245,6 +249,7 @@ class HttpTransport:
             accept_language=self.accept_language,
             retry_unauthorized=self.retry_unauthorized,
             log_http=self.log_http,
+            log_raw_http=self.log_raw_http,
             logger=self.logger,
         )
 
@@ -266,6 +271,25 @@ class HttpTransport:
             decoder=decoder,
         )
 
+    def get(
+        self,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+        authorized: bool = True,
+        decoder: Callable[[Any], Any] | None = None,
+    ) -> Any:
+        """Send an authorized or public GET request and decode its response envelope."""
+
+        return self._request_serialized(
+            "GET",
+            path,
+            None,
+            headers=headers,
+            authorized=authorized,
+            decoder=decoder,
+        )
+
     def post_serialized(
         self,
         path: str,
@@ -277,7 +301,30 @@ class HttpTransport:
     ) -> Any:
         """Send exact JSON bytes, preserving them for signing and transmission."""
 
+        return self._request_serialized(
+            "POST",
+            path,
+            body,
+            headers=headers,
+            authorized=authorized,
+            decoder=decoder,
+        )
+
+    def _request_serialized(
+        self,
+        method: str,
+        path: str,
+        body: bytes | None,
+        *,
+        headers: dict[str, str] | None = None,
+        authorized: bool = True,
+        decoder: Callable[[Any], Any] | None = None,
+    ) -> Any:
+        """Send one HTTP request using the shared response and retry handling."""
+
         self.last_response_body = None
+        if method not in {"GET", "POST"}:
+            raise ValueError("method must be GET or POST")
         if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
             raise ValueError("path must start with exactly one '/'")
         if any(character in path for character in ("?", "#", "\\")):
@@ -311,10 +358,10 @@ class HttpTransport:
             request_url,
             data=body,
             headers=request_headers,
-            method="POST",
+            method=method,
         )
         if self.log_http:
-            self._log_request(request_url, request_headers, body)
+            self._log_request(request_url, request_headers, body, method=method)
         response = None
         attempt = 0
         while True:
@@ -324,6 +371,8 @@ class HttpTransport:
                 status = int(status_value if status_value is not None else response.getcode())
                 raw_response = self._read_response(response, status)
                 self.last_response_body = raw_response
+                if self.log_raw_http:
+                    self._log_raw_response(request_url, status, raw_response)
                 if self.log_http:
                     self._log_response(request_url, status, raw_response)
                 text = self._response_text(raw_response)
@@ -365,6 +414,8 @@ class HttpTransport:
                 except LuminalApiException:
                     raise
                 except Exception as exc:
+                    if not self.log_raw_http:
+                        self._log_raw_response(request_url, status, raw_response)
                     raise LuminalApiException(
                         "Luminal API response could not be decoded",
                         http_status=status,
@@ -377,6 +428,8 @@ class HttpTransport:
                     self.last_response_body = raw_response
                 finally:
                     self._close_response(exc)
+                if self.log_raw_http:
+                    self._log_raw_response(request_url, exc.code, raw_response)
                 if self.log_http:
                     self._log_response(request_url, exc.code, raw_response)
                 text = self._response_text(raw_response)
@@ -404,7 +457,14 @@ class HttpTransport:
             finally:
                 self._close_response(response)
 
-    def _log_request(self, url: str, headers: dict[str, str], body: bytes | None) -> None:
+    def _log_request(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes | None,
+        *,
+        method: str = "POST",
+    ) -> None:
         if not self._logging_enabled():
             return
         safe_headers = {
@@ -412,7 +472,8 @@ class HttpTransport:
             for name, value in headers.items()
         }
         self.logger.info(
-            "HTTP request method=POST url={} headers={} body={}".format(
+            "HTTP request method={} url={} headers={} body={}".format(
+                method,
                 json.dumps(url, ensure_ascii=False),
                 json.dumps(safe_headers, ensure_ascii=False, separators=(",", ":")),
                 json.dumps(self._redact_log_body(body), ensure_ascii=False),
@@ -436,6 +497,17 @@ class HttpTransport:
                 json.dumps(url, ensure_ascii=False),
                 status,
                 json.dumps(self._redact_log_body(body), ensure_ascii=False),
+            )
+        )
+
+    def _log_raw_response(self, url: str, status: int, body: bytes) -> None:
+        if not self.log_http or not self._logging_enabled():
+            return
+        self.logger.info(
+            "HTTP raw response url={} status={} body={}".format(
+                json.dumps(url, ensure_ascii=False),
+                status,
+                json.dumps(body.decode("utf-8", errors="replace"), ensure_ascii=False),
             )
         )
 

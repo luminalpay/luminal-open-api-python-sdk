@@ -7,7 +7,7 @@ import re
 import sys
 import types
 from dataclasses import fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
@@ -77,6 +77,22 @@ def _decode_epoch_datetime(value: int | float | Decimal) -> datetime:
         raise ValueError("Epoch timestamp is outside datetime range") from exc
 
 
+def _decode_date(value: Any) -> date:
+    if isinstance(value, (list, tuple)):
+        if len(value) != 3:
+            raise ValueError("Expected a date array with year, month, and day")
+        try:
+            year = _decode_integral(value[0], "date year")
+            month = _decode_integral(value[1], "date month")
+            day = _decode_integral(value[2], "date day")
+            return date(year, month, day)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Expected a valid date array with year, month, and day") from exc
+    if not isinstance(value, str):
+        raise TypeError("Expected an ISO-8601 date string or date array")
+    return date.fromisoformat(value)
+
+
 def decode_value(value: Any, target: Any) -> Any:
     """Decode JSON-compatible data into a typed SDK model."""
 
@@ -129,6 +145,8 @@ def decode_value(value: Any, target: Any) -> Any:
         if not isinstance(value, str):
             raise TypeError("Expected an ISO-8601 datetime string or epoch timestamp")
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if target is date:
+        return _decode_date(value)
     if isinstance(target, type) and issubclass(target, Enum):
         return target(value)
     if isinstance(target, type) and is_dataclass(target):

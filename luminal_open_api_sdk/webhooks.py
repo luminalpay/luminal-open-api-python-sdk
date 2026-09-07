@@ -15,6 +15,7 @@ from .crypto import RsaPublicKey, read_public_key, verify
 from .models import (
     CardOpenStatusWebhook,
     CardStatusWebhook,
+    RechargeCardTransferStatusWebhook,
     SharedAccountOpenStatusWebhook,
     TransactionWebhook,
 )
@@ -28,8 +29,12 @@ class WebhookEventType(str, Enum):
     """Supported values of the webhook ``event`` header."""
 
     CARD_TRANSACTIONS = "CARD_TRANSACTIONS"
+    CARD_SETTLE_STATUS = "CARD_SETTLE_STATUS"
     CARD_STATUS = "CARD_STATUS"
     CARD_OPEN_STATUS = "CARD_OPEN_STATUS"
+    CARD_RECHARGE_STATUS = "CARD_RECHARGE_STATUS"
+    CARD_WITHDRAW_STATUS = "CARD_WITHDRAW_STATUS"
+    CARD_LIMIT_STATUS = "CARD_LIMIT_STATUS"
     SHARED_ACCOUNT_OPEN_STATUS = "SHARED_ACCOUNT_OPEN_STATUS"
     SHARE_ACCOUNT_FUND_TRANSACTIONS = "SHARE_ACCOUNT_FUND_TRANSACTIONS"
 
@@ -197,6 +202,12 @@ def _payload_type(event_type: WebhookEventType) -> type[Any]:
         return CardOpenStatusWebhook
     if event_type is WebhookEventType.CARD_STATUS:
         return CardStatusWebhook
+    if event_type in {
+        WebhookEventType.CARD_RECHARGE_STATUS,
+        WebhookEventType.CARD_WITHDRAW_STATUS,
+        WebhookEventType.CARD_LIMIT_STATUS,
+    }:
+        return RechargeCardTransferStatusWebhook
     if event_type is WebhookEventType.SHARED_ACCOUNT_OPEN_STATUS:
         return SharedAccountOpenStatusWebhook
     return TransactionWebhook

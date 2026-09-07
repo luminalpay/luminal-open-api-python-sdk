@@ -1,4 +1,4 @@
-"""Real HTTP integration tests for every Luminal Open API SDK endpoint."""
+"""Real HTTP integration tests for the shared-card Luminal Open API flow."""
 
 from __future__ import annotations
 
@@ -56,12 +56,12 @@ logging.basicConfig(
 )
 
 DEFAULT_BASE_URL = "https://sandbox-openapi.luminalads.com"
-SANDBOX_APP_ID = "lpsha6pj5mwsb7tz"
-SANDBOX_APP_SECRET = "P11g59PXY33JjqL4CRJ2Oz3nfsjsWRKe"
+SANDBOX_APP_ID = "lpizbghmayb1fzne"
+SANDBOX_APP_SECRET = "pYDU4q1YsCZRvutck3mMUYBesDxPKQIO"
 SANDBOX_CARD_BIN = "22346703"
 _LOGGER = logging.getLogger(__name__)
 _WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
-_WEBHOOK_WAIT_SECONDS = float(os.getenv("LUMINAL_OPEN_API_WEBHOOK_WAIT_SECONDS", "120"))
+_WEBHOOK_WAIT_SECONDS = float(os.getenv("LUMINAL_OPEN_API_WEBHOOK_WAIT_SECONDS", "30"))
 _WEBHOOK_LOG_INTERVAL_SECONDS = 10.0
 _WEBHOOK_CONDITION = threading.Condition()
 _CARD_OPEN_WEBHOOKS: dict[str, CardOpenStatusWebhook] = {}
@@ -197,6 +197,7 @@ class _WebhookRequestHandler(BaseHTTPRequestHandler):
             client = _CACHED_CLIENT or LuminalOpenApiClient(
                 os.getenv("LUMINAL_OPEN_API_BASE_URL", DEFAULT_BASE_URL),
                 log_http=os.getenv("LUMINAL_OPEN_API_LOG_HTTP", "1") == "1",
+                log_raw_http=os.getenv("LUMINAL_OPEN_API_LOG_RAW_HTTP", "1") == "1",
             )
             payload = client.parse_webhook(
                 event_type,
@@ -337,6 +338,7 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
                 retry_unauthorized=int(os.getenv("LUMINAL_OPEN_API_RETRY_UNAUTHORIZED", "1")),
                 accept_language=os.getenv("LUMINAL_OPEN_API_ACCEPT_LANGUAGE", "en"),
                 log_http=os.getenv("LUMINAL_OPEN_API_LOG_HTTP", "1") == "1",
+                log_raw_http=os.getenv("LUMINAL_OPEN_API_LOG_RAW_HTTP", "1") == "1",
                 opener=_sandbox_urlopen,
             )
         self._active_client = _CACHED_CLIENT
@@ -358,6 +360,7 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
             retry_unauthorized=int(os.getenv("LUMINAL_OPEN_API_RETRY_UNAUTHORIZED", "1")),
             accept_language=os.getenv("LUMINAL_OPEN_API_ACCEPT_LANGUAGE", "en"),
             log_http=os.getenv("LUMINAL_OPEN_API_LOG_HTTP", "1") == "1",
+            log_raw_http=os.getenv("LUMINAL_OPEN_API_LOG_RAW_HTTP", "1") == "1",
             opener=_sandbox_urlopen,
         )
 
@@ -1021,7 +1024,7 @@ YSl1QnrMvJj2mvDWk5nntw==
         except LuminalApiException as exc:
             self.assertIn("cancel", str(exc).lower())
 
-    def test_get_card_issue_details_from_sandbox(self) -> None:
+    def test_get_issue_details_from_sandbox(self) -> None:
         self._run_mutations()
         try:
             task_id = self._issue_once()
@@ -1086,7 +1089,7 @@ _TEST_ORDER = (
     (SandboxCardsApiTest, "test_list_card_transactions_from_sandbox"),
     (SandboxCardsApiTest, "test_get_card_limit_from_sandbox"),
     (SandboxCardsApiTest, "test_modify_card_limit_from_sandbox"),
-    (SandboxCardsApiTest, "test_get_card_issue_details_from_sandbox"),
+    (SandboxCardsApiTest, "test_get_issue_details_from_sandbox"),
     (SandboxCardGroupsApiTest, "test_list_card_groups_from_sandbox"),
     (SandboxCardGroupsApiTest, "test_update_card_group_from_sandbox"),
     (SandboxCardsApiTest, "test_freeze_card_from_sandbox"),
@@ -1105,7 +1108,7 @@ assert tuple(
     "test_list_card_transactions_from_sandbox",
     "test_get_card_limit_from_sandbox",
     "test_modify_card_limit_from_sandbox",
-    "test_get_card_issue_details_from_sandbox",
+    "test_get_issue_details_from_sandbox",
     "test_freeze_card_from_sandbox",
     "test_unfreeze_card_from_sandbox",
     "test_cancel_card_from_sandbox",

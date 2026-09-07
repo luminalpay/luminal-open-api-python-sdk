@@ -33,6 +33,7 @@ from luminal_open_api_sdk import (
     CardLimitUpdateRequest,
     IssueCardRequest,
     LuminalOpenApiClient,
+    MemberCardRechargeRequest,
 )
 
 client = LuminalOpenApiClient(
@@ -43,6 +44,7 @@ client = LuminalOpenApiClient(
 cards = client.cards.list(request=...)
 client.cards.freeze(CardIdRequest(member_card_id=123))
 client.cards.modify_limit(CardLimitUpdateRequest(123, Decimal("500.00")))
+client.cards.recharge(MemberCardRechargeRequest(123, Decimal("50.00"), "funding"))
 ```
 
 The client accepts a gateway context path in `base_url`. Query strings and fragments are rejected.
@@ -93,6 +95,7 @@ The rule applies to typed `Long` request fields during normal transmission. It a
 | `SharedAccountsApi` | `list`          | `POST /open-api/v1/shared-account/list`         |
 | `SharedAccountsApi` | `increase`      | `POST /open-api/v1/shared-account/increase`     |
 | `SharedAccountsApi` | `decrease`      | `POST /open-api/v1/shared-account/decrease`     |
+| `SharedAccountsApi` | `cancel`        | `POST /open-api/v1/shared-account/cancel`       |
 | `SharedAccountsApi` | `details`       | `POST /open-api/v1/shared-account/details`      |
 | `SharedAccountsApi` | `transactions`  | `POST /open-api/v1/shared-account/transactions` |
 | `CardsApi`          | `bins`          | `POST /open-api/v1/cards/bins`                  |
@@ -102,9 +105,19 @@ The rule applies to typed `Long` request fields during normal transmission. It a
 | `CardsApi`          | `transactions`  | `POST /open-api/v1/cards/transactions`          |
 | `CardsApi`          | `limit`         | `POST /open-api/v1/cards/limit`                 |
 | `CardsApi`          | `modify_limit`  | `POST /open-api/v1/cards/limit/modify`          |
+| `CardsApi`          | `modify_limit_async` | `POST /open-api/v1/cards/limit/modify/operation-record` |
 | `CardsApi`          | `freeze`        | `POST /open-api/v1/cards/freeze`                |
 | `CardsApi`          | `unfreeze`      | `POST /open-api/v1/cards/unfreeze`              |
 | `CardsApi`          | `cancel`        | `POST /open-api/v1/cards/cancel`                |
+| `CardsApi`          | `recharge`      | `POST /open-api/v1/cards/recharge`              |
+| `CardsApi`          | `withdraw`      | `POST /open-api/v1/cards/withdraw`              |
+| `CardsApi`          | `operation_records` | `POST /open-api/v1/cards/operation-record`      |
+| `CardHoldersApi`    | `countries`     | `GET /open-api/v1/card-holders/countries`       |
+| `CardHoldersApi`    | `add`           | `POST /open-api/v1/card-holders/add`            |
+| `CardHoldersApi`    | `modify`        | `POST /open-api/v1/card-holders/modify`         |
+| `CardHoldersApi`    | `detail`        | `POST /open-api/v1/card-holders/info/{card_holder_id}` |
+| `CardHoldersApi`    | `page`          | `POST /open-api/v1/card-holders/page`           |
+| `CardHoldersApi`    | `associated_cards` | `POST /open-api/v1/card-holders/card/page`      |
 | `CardsApi`          | `issue_details` | `POST /open-api/v1/cards/issue/detail`          |
 | `CardGroupsApi`     | `list`          | `POST /open-api/v1/cards/group`                 |
 | `CardGroupsApi`     | `create`        | `POST /open-api/v1/cards/group/create`          |
@@ -138,6 +151,11 @@ task_id = client.cards.issue(request, private_key)
 The `sign` header contains the Base64 signature. Do not log card numbers, CVV values, expiry values, private keys, or
 bearer tokens.
 
+Recharge, withdrawal, and asynchronous card-limit updates return operation-record identifiers. Recharge and withdrawal
+use bearer authorization and JSON only; query their status with `cards.operation_record(...)` or
+`cards.operation_records(...)`. `CardLimitUpdateRequest` accepts `daily_limit`, `month_limit`, and `total_limit`; its
+legacy `card_type` field is retained for compatibility but is not sent.
+
 ## Webhooks
 
 Verify the exact request body bytes before parsing. For duplicate-delivery protection, pass a shared process-local
@@ -162,8 +180,12 @@ print(verified.type, verified.event_id, verified.payload)
 Supported event headers:
 
 - `CARD_TRANSACTIONS` → `TransactionWebhook`
+- `CARD_SETTLE_STATUS` → `TransactionWebhook`
 - `CARD_STATUS` → `CardStatusWebhook`
 - `CARD_OPEN_STATUS` → `CardOpenStatusWebhook`
+- `CARD_RECHARGE_STATUS` → `RechargeCardTransferStatusWebhook`
+- `CARD_WITHDRAW_STATUS` → `RechargeCardTransferStatusWebhook`
+- `CARD_LIMIT_STATUS` → `RechargeCardTransferStatusWebhook`
 - `SHARED_ACCOUNT_OPEN_STATUS` → `SharedAccountOpenStatusWebhook`
 - `SHARE_ACCOUNT_FUND_TRANSACTIONS` → `TransactionWebhook`
 
@@ -185,7 +207,7 @@ Each controller endpoint has an independent `unittest.TestCase` class. Each webh
 
 ### Sandbox integration tests
 
-`tests/test_sandbox_integration.py` performs real HTTP requests against every SDK endpoint:
+`tests/share_card_sandbox_open_api_integration_test.py` performs real HTTP requests against the shared-card SDK flow:
 
 - Auth: `get_token`, `refresh_token`, `logout`
 - Accounts: `list`
@@ -198,20 +220,37 @@ Each controller endpoint has an independent `unittest.TestCase` class. Each webh
 Read-only endpoints run with only app credentials. The sandbox test class caches one authenticated client, reuses its
 token, and refreshes it automatically when the token is near expiry or the API returns unauthorized. Side-effecting
 endpoints now run by default; destructive endpoints also run by default. Sandbox credentials and the test private key
-are defined directly in `tests/test_sandbox_integration.py` for demo use. Do not reuse them outside Sandbox or publish
+are defined directly in `tests/share_card_sandbox_open_api_integration_test.py` for demo use. Do not reuse them outside Sandbox or publish
 this test source. SDK HTTP logging uses stdlib `logging` and is visible on the console with zero configuration. It is on
 by default. Set `LUMINAL_OPEN_API_LOG_HTTP=0` to disable it for the sandbox integration test. Each enabled log is one
 structured line with timestamp, level, logger, source
 file/line, request method/URL/headers/body, or response URL/status/body. Header names and recursive JSON field names are
 matched case-insensitively. `Authorization`, `Cookie`, `Set-Cookie`, `sign`, `accessToken`, `refreshToken`, `appSecret`,
-`cvv`, `cardNo`, and `cardNumber` values become `<redacted>`. Non-JSON bodies become `<non-json N bytes>`.
+`cvv`, `cardNo`, `cardNumber`, and `verifyCode` values become `<redacted>`. Non-JSON bodies become `<non-json N bytes>`.
+
+For troubleshooting, both shared-card and recharge-card integration tests also enable original HTTP response logging by
+default. Set `LUMINAL_OPEN_API_LOG_RAW_HTTP=0` to disable it. Original response logs can contain sensitive Sandbox data;
+use them only for local debugging.
 
 PowerShell:
 
 ```powershell
 $env:LUMINAL_OPEN_API_LOG_HTTP = "1"
-python -m unittest tests.test_sandbox_integration -v
+python -m unittest tests.share_card_sandbox_open_api_integration_test -v
 ```
+
+The recharge-card flow is covered separately by
+`tests/recharge_card_sandbox_open_api_integration_test.py`:
+
+```powershell
+python -m unittest tests.recharge_card_sandbox_open_api_integration_test -v
+```
+
+The recharge-card test has Java-aligned Sandbox configuration in the test class, including app credentials and the test
+private key. `LUMINAL_OPEN_API_RECHARGE_APP_ID`, `LUMINAL_OPEN_API_RECHARGE_APP_SECRET`, and
+`LUMINAL_OPEN_API_RECHARGE_PRIVATE_KEY` / `LUMINAL_OPEN_API_RECHARGE_PRIVATE_KEY_PATH` can override the class defaults.
+The recharge-specific variables fall back to their shared `LUMINAL_OPEN_API_*` counterparts where applicable;
+`LUMINAL_OPEN_API_RECHARGE_CARD_BIN` defaults to `578391`.
 
 SDK options:
 
@@ -219,6 +258,7 @@ SDK options:
 - `retry_unauthorized`: retry count after unauthorized response, default `1`
 - `accept_language`: `en` default, `zh` optional
 - `log_http`: request/response logging through the SDK's console handler, default `true`; set `False` to disable
+- `log_raw_http`: original response logging for local diagnostics, default `false`
 
 Sandbox test behavior:
 

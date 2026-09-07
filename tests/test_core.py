@@ -11,7 +11,7 @@ import ssl
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest import mock
 
 import structlog
@@ -31,7 +31,7 @@ from luminal_open_api_sdk.crypto import RsaPrivateKey, RsaPublicKey
 from luminal_open_api_sdk.models import CardIdRequest, Long, MemberCardPageRequest, WalletInfoRequest
 
 from tests.support import FakeOpener, FakeResponse, PRIVATE_KEY_PEM, PUBLIC_KEY_PEM, SequenceOpener, client_for
-from tests.test_sandbox_integration import _sandbox_urlopen
+from tests.share_card_sandbox_open_api_integration_test import _sandbox_urlopen
 from luminal_open_api_sdk.transport import HttpTransport
 
 
@@ -182,6 +182,12 @@ class IntegerSerializationTest(unittest.TestCase):
 
 
 class ResponseDecodingTest(unittest.TestCase):
+    def test_java_local_date_arrays_decode_to_dates(self) -> None:
+        expected = date(1990, 1, 15)
+
+        self.assertEqual(expected, decode_value([1990, 1, 15], date))
+        self.assertEqual(expected, decode_value([1990, 1, 15], date | None))
+
     def test_datetime_timestamps_decode_milliseconds_and_microseconds(self) -> None:
         self.assertEqual(
             datetime(2026, 7, 17, 9, 44, 9, tzinfo=timezone.utc),
@@ -401,6 +407,45 @@ class TransportErrorTest(unittest.TestCase):
 
 
 class TransportLoggingTest(unittest.TestCase):
+    def test_decode_failure_logs_raw_response(self) -> None:
+        body = b'{"code":0,"data":{"birthDate":[1990,1,15]}}'
+        transport = HttpTransport(
+            "https://api.example.test",
+            bearer_token="secret-token",
+            opener=FakeOpener(FakeResponse(body)),
+        )
+
+        with self.assertLogs("luminal_open_api_sdk.transport", level="INFO") as captured:
+            with self.assertRaisesRegex(LuminalApiException, "could not be decoded"):
+                transport.post_serialized("/test", None, decoder=lambda value: value["missing"])
+
+        raw_records = [record for record in captured.records if "HTTP raw response" in record.getMessage()]
+        self.assertEqual(1, len(raw_records))
+        message = raw_records[0].getMessage()
+        self.assertIn("HTTP raw response url=\"https://api.example.test/test\" status=200", message)
+        self.assertIn("birthDate", message)
+        self.assertIn("[1990,1,15]", message)
+
+    def test_raw_http_logging_precedes_redacted_response_logging(self) -> None:
+        body = b'{"code":0,"data":{"status":"PENDING"}}'
+        transport = HttpTransport(
+            "https://api.example.test",
+            bearer_token="secret-token",
+            opener=FakeOpener(FakeResponse(body)),
+            log_raw_http=True,
+        )
+
+        with self.assertLogs("luminal_open_api_sdk.transport", level="INFO") as captured:
+            self.assertEqual({"status": "PENDING"}, transport.post_serialized("/test", None))
+
+        self.assertEqual(3, len(captured.records))
+        messages = [record.getMessage() for record in captured.records]
+        self.assertIn("HTTP request", messages[0])
+        self.assertIn("HTTP raw response", messages[1])
+        self.assertIn("status", messages[1])
+        self.assertIn("PENDING", messages[1])
+        self.assertIn("HTTP response", messages[2])
+
     def test_http_logging_is_enabled_by_default(self) -> None:
         transport = HttpTransport(
             "https://api.example.test",
@@ -544,6 +589,16 @@ class TransportLoggingTest(unittest.TestCase):
 
 
 class ClientValidationTest(unittest.TestCase):
+    def test_raw_response_logging_survives_bearer_token_switch(self) -> None:
+        client = LuminalOpenApiClient(
+            "https://api.example.test",
+            "token",
+            log_raw_http=True,
+        )
+
+        self.assertTrue(client.transport.log_raw_http)
+        self.assertTrue(client.with_bearer_token("other-token").transport.log_raw_http)
+
     def test_default_transport_uses_shared_cookie_jar(self) -> None:
         client = LuminalOpenApiClient("https://api.example.test", "token", log_http=False)
         opener = client.transport._opener

@@ -18,6 +18,14 @@ from .models import (
     CardGroupRequest,
     CardGroupResponse,
     CardGroupUpdateRequest,
+    CardHolderCardPageRequest,
+    CardHolderCardResponse,
+    CardHolderCountryResponse,
+    CardHolderCreateRequest,
+    CardHolderDetailResponse,
+    CardHolderModifyRequest,
+    CardHolderPageRequest,
+    CardHolderPageResponse,
     CardIdRequest,
     CardLimitResponse,
     CardLimitUpdateRequest,
@@ -30,11 +38,16 @@ from .models import (
     Long,
     MemberCardPageRequest,
     MemberCardResponse,
+    MemberCardRechargeRequest,
+    MemberCardWithdrawRequest,
     OAuth2Token,
     PageResult,
     PageResultEx,
+    RechargeCardOperationRecordRequest,
+    RechargeCardOperationRecordResponse,
     RefreshTokenRequest,
     SharedAccountBalanceRequest,
+    SharedAccountCancelRequest,
     SharedAccountGetRequest,
     SharedAccountIdResponse,
     SharedAccountPageRequest,
@@ -76,6 +89,14 @@ def _decode_page(data: Any, item_type: type[T], extended: bool) -> PageResult[T]
     if extended:
         return PageResultEx(total=total, list=decoded_items, extra=data.get("extra"))
     return PageResult(total=total, list=decoded_items)
+
+
+def _decode_list(data: Any, item_type: type[T]) -> list[T] | None:
+    if data is None:
+        return None
+    if not isinstance(data, list):
+        raise ValueError("Expected a response array")
+    return [decode_value(item, item_type) for item in data]
 
 
 def _decode_bool(value: Any) -> bool:
@@ -225,6 +246,10 @@ class SharedAccountsApi:
         """Withdraw funds from a shared account."""
         return self._post("/decrease", request, SharedAccountTransactionIdResponse)
 
+    def cancel(self, request: SharedAccountCancelRequest) -> bool:
+        """Cancel a shared account with the server-required verification code."""
+        return self._action("/cancel", request)
+
     def details(self, request: SharedAccountGetRequest) -> SharedAccountResponse | None:
         """Retrieve one shared account and its supported operations."""
         return self._post("/details", request, SharedAccountResponse)
@@ -243,6 +268,9 @@ class SharedAccountsApi:
             _require_request(request),
             decoder=_decode_model(model_type),
         )
+
+    def _action(self, path: str, request: Any) -> bool:
+        return self._transport.post(self._PATH + path, _require_request(request), decoder=_decode_bool)
 
 
 class CardsApi:
@@ -304,6 +332,10 @@ class CardsApi:
         """Update a card limit."""
         return self._action("/limit/modify", request)
 
+    def modify_limit_async(self, request: CardLimitUpdateRequest) -> Long | None:
+        """Update a card limit asynchronously and return its operation-record identifier."""
+        return self._post("/limit/modify/operation-record", request, Long)
+
     def freeze(self, request: CardIdRequest) -> bool:
         """Freeze a card."""
         return self._action("/freeze", request)
@@ -316,12 +348,35 @@ class CardsApi:
         """Cancel a card."""
         return self._action("/cancel", request)
 
+    def recharge(self, request: MemberCardRechargeRequest) -> Long | None:
+        """Submit a rechargeable-card funding request."""
+        return self._post("/recharge", request, Long)
+
+    def withdraw(self, request: MemberCardWithdrawRequest) -> Long | None:
+        """Submit a rechargeable-card withdrawal request."""
+        return self._post("/withdraw", request, Long)
+
+    def operation_record(
+        self, request: RechargeCardOperationRecordRequest
+    ) -> RechargeCardOperationRecordResponse | None:
+        """Return the first operation record matching the supplied query, if any."""
+        page = self.operation_records(request)
+        if page is None or not page.list:
+            return None
+        return page.list[0]
+
+    def operation_records(
+        self, request: RechargeCardOperationRecordRequest
+    ) -> PageResultEx[RechargeCardOperationRecordResponse] | None:
+        """Query rechargeable-card funding, withdrawal, and limit operations."""
+        return self._page("/operation-record", request, RechargeCardOperationRecordResponse)
+
     def issue_details(self, request: IssueCardDetailsRequest) -> list[IssueCardDetailsResponse] | None:
         """Retrieve per-card results for an issuance task."""
         return self._transport.post(
             self._PATH + "/issue/detail",
             _require_request(request),
-            decoder=lambda data: None if data is None else [decode_value(item, IssueCardDetailsResponse) for item in data],
+            decoder=lambda data: _decode_list(data, IssueCardDetailsResponse),
         )
 
     def _post(self, path: str, request: Any, model_type: type[T]) -> T | None:
@@ -340,6 +395,65 @@ class CardsApi:
 
     def _action(self, path: str, request: Any) -> bool:
         return self._transport.post(self._PATH + path, _require_request(request), decoder=_decode_bool)
+
+
+class CardHoldersApi:
+    """Cardholder management endpoints."""
+
+    _PATH = "/open-api/v1/card-holders"
+
+    def __init__(self, transport: HttpTransport) -> None:
+        self._transport = transport
+
+    def add(self, request: CardHolderCreateRequest) -> Long | None:
+        """Create a cardholder and return its identifier."""
+        return self._post("/add", request, Long)
+
+    def countries(self) -> list[CardHolderCountryResponse] | None:
+        """List countries and regions available for cardholder information."""
+        return self._transport.get(
+            self._PATH + "/countries",
+            decoder=lambda data: _decode_list(data, CardHolderCountryResponse),
+        )
+
+    def modify(self, request: CardHolderModifyRequest) -> None:
+        """Update all editable fields of a cardholder."""
+        self._transport.post(
+            self._PATH + "/modify",
+            _require_request(request),
+            decoder=lambda _data: None,
+        )
+
+    def detail(self, card_holder_id: Long) -> CardHolderDetailResponse | None:
+        """Retrieve cardholder details by identifier."""
+        if card_holder_id is None:
+            raise ValueError("card_holder_id must not be None")
+        return self._post(f"/info/{card_holder_id}", {}, CardHolderDetailResponse)
+
+    def page(self, request: CardHolderPageRequest) -> PageResult[CardHolderPageResponse] | None:
+        """List cardholders owned by the current member."""
+        return self._transport.post(
+            self._PATH + "/page",
+            _require_request(request),
+            decoder=lambda data: _decode_page(data, CardHolderPageResponse, False),
+        )
+
+    def associated_cards(
+        self, request: CardHolderCardPageRequest
+    ) -> PageResult[CardHolderCardResponse] | None:
+        """List cards associated with a cardholder."""
+        return self._transport.post(
+            self._PATH + "/card/page",
+            _require_request(request),
+            decoder=lambda data: _decode_page(data, CardHolderCardResponse, False),
+        )
+
+    def _post(self, path: str, request: Any, model_type: type[T]) -> T | None:
+        return self._transport.post(
+            self._PATH + path,
+            _require_request(request),
+            decoder=_decode_model(model_type),
+        )
 
 
 class CardGroupsApi:
@@ -398,6 +512,7 @@ class LuminalOpenApiClient:
         retry_unauthorized: int = 1,
         accept_language: str = "en",
         log_http: bool = True,
+        log_raw_http: bool = False,
         logger: Any | None = None,
     ) -> None:
         self._token_cache: _OAuthTokenCache | None = None
@@ -408,6 +523,7 @@ class LuminalOpenApiClient:
             "accept_language": accept_language,
             "retry_unauthorized": retry_unauthorized,
             "log_http": log_http,
+            "log_raw_http": log_raw_http,
             "logger": logger,
         }
         if app_id is not None or app_secret is not None:
@@ -440,6 +556,7 @@ class LuminalOpenApiClient:
         self.transactions = TransactionsApi(transport)
         self.shared_accounts = SharedAccountsApi(transport)
         self.cards = CardsApi(transport)
+        self.card_holders = CardHoldersApi(transport)
         self.card_groups = CardGroupsApi(transport)
 
     @property
