@@ -112,12 +112,79 @@ class WalletTransactionResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class CardPoolRequest:
+    """Filters for the available card-pool list endpoint."""
+
+    card_pool_id: Long | None = None
+    pool_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CardPoolResponse:
+    """Card-pool information returned by the API."""
+
+    card_pool_id: Long | None = None
+    pool_name: str | None = None
+    available_count: int | None = None
+    shared_account_count: int | None = None
+    card_bins: list[str] | None = None
+    can_apply_account: int | None = None
+    can_apply: int | None = None
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class CreateSharedAccountRequest:
     """Parameters for creating and initially funding a shared account."""
 
     card_bin_id: Long | None = None
+    card_pool_id: Long | None = None
     recharge_amount: Decimal | None = None
     account_name: str | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a request using either the pool-aware or legacy positional shape."""
+
+        names = ("card_bin_id", "card_pool_id", "recharge_amount", "account_name")
+        if len(args) > len(names):
+            raise TypeError(f"CreateSharedAccountRequest expected at most {len(names)} arguments")
+
+        legacy_names = ("card_bin_id", "recharge_amount", "account_name")
+        legacy_shape = len(args) == 3 or (
+            2 <= len(args) < 4 and (isinstance(args[1], Decimal) or args[1] is None)
+        )
+        if legacy_shape:
+            # Previous Python/Java API: (card_bin_id, recharge_amount, account_name).
+            values = dict.fromkeys(names, None)
+            values.update(dict(zip(legacy_names, args)))
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(
+                    f"CreateSharedAccountRequest got an unexpected keyword argument {unexpected!r}"
+                )
+            for name, value in kwargs.items():
+                if name in legacy_names[: len(args)]:
+                    raise TypeError(f"CreateSharedAccountRequest got multiple values for argument {name!r}")
+                values[name] = value
+        else:
+            values = {name: None for name in names}
+            for name, value in zip(names, args):
+                values[name] = value
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(
+                    f"CreateSharedAccountRequest got an unexpected keyword argument {unexpected!r}"
+                )
+            for name, value in kwargs.items():
+                if name in names[: len(args)]:
+                    raise TypeError(f"CreateSharedAccountRequest got multiple values for argument {name!r}")
+                values[name] = value
+
+        if values["card_bin_id"] is None and values["card_pool_id"] is None:
+            raise ValueError("At least one of card_bin_id or card_pool_id must be provided")
+        for name in names:
+            object.__setattr__(self, name, values[name])
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,9 +202,10 @@ class SharedAccountPageRequest:
     page_size: int | None = None
     member_shared_account_id: Long | None = None
     account_name: str | None = None
+    card_pool_id: Long | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class SharedAccountResponse:
     """Shared-account details and server-provided operation flags."""
 
@@ -147,6 +215,8 @@ class SharedAccountResponse:
     create_time: datetime | None = None
     card_bin: str | None = None
     card_bin_id: Long | None = None
+    card_pool_id: Long | None = None
+    pool_name: str | None = None
     card_organization: str | None = None
     balance: Decimal | None = None
     issued_card_count: Long | None = None
@@ -158,6 +228,86 @@ class SharedAccountResponse:
     can_freeze: int | None = None
     can_unfreeze: int | None = None
     can_cancel: int | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a response using either the pool-aware or legacy positional shape."""
+
+        names = (
+            "member_shared_account_id",
+            "account_name",
+            "status",
+            "create_time",
+            "card_bin",
+            "card_bin_id",
+            "card_pool_id",
+            "pool_name",
+            "card_organization",
+            "balance",
+            "issued_card_count",
+            "remaining_apply_card_count",
+            "can_recharge",
+            "can_apply",
+            "apply_handling_fee",
+            "can_reduce",
+            "can_freeze",
+            "can_unfreeze",
+            "can_cancel",
+        )
+        if len(args) > len(names):
+            raise TypeError(f"SharedAccountResponse expected at most {len(names)} arguments")
+
+        legacy_names = (
+            "member_shared_account_id",
+            "account_name",
+            "status",
+            "create_time",
+            "card_bin",
+            "card_bin_id",
+            "card_organization",
+            "balance",
+            "issued_card_count",
+            "remaining_apply_card_count",
+            "can_recharge",
+            "can_apply",
+            "apply_handling_fee",
+            "can_reduce",
+            "can_freeze",
+            "can_unfreeze",
+            "can_cancel",
+        )
+        legacy_shape = (
+            7 <= len(args) < len(names)
+            and (isinstance(args[6], str) or args[6] is None)
+        )
+        if legacy_shape:
+            # Preserve the previous response shape for positional callers. The fields before
+            # card_organization are unchanged; the added pool fields are populated by keyword
+            # when present.
+            values = dict.fromkeys(names, None)
+            values.update(dict(zip(legacy_names, args)))
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(f"SharedAccountResponse got an unexpected keyword argument {unexpected!r}")
+            for name, value in kwargs.items():
+                if name in legacy_names[: len(args)]:
+                    raise TypeError(f"SharedAccountResponse got multiple values for argument {name!r}")
+                values[name] = value
+        else:
+            values = {name: None for name in names}
+            for name, value in zip(names, args):
+                values[name] = value
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(f"SharedAccountResponse got an unexpected keyword argument {unexpected!r}")
+            for name, value in kwargs.items():
+                if name in names[: len(args)]:
+                    raise TypeError(f"SharedAccountResponse got multiple values for argument {name!r}")
+                values[name] = value
+
+        for name in names:
+            object.__setattr__(self, name, values[name])
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,23 +499,78 @@ class CardHolderCountryResponse:
     phone_max_length: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class CardBinsRequest:
     """Filters for available card BIN products."""
 
     page_no: int | None = None
     page_size: int | None = None
+    card_pool_id: Long | None = None
     card_type: str | None = None
     card_organization: str | None = None
     card_bin: str | None = None
     area_code: str | None = None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a request using either the pool-aware or legacy positional shape."""
 
-@dataclass(frozen=True, slots=True)
+        names = (
+            "page_no",
+            "page_size",
+            "card_pool_id",
+            "card_type",
+            "card_organization",
+            "card_bin",
+            "area_code",
+        )
+        if len(args) > len(names):
+            raise TypeError(f"CardBinsRequest expected at most {len(names)} arguments")
+
+        legacy_names = (
+            "page_no",
+            "page_size",
+            "card_type",
+            "card_organization",
+            "card_bin",
+            "area_code",
+        )
+        legacy_shape = len(args) == 6 or (len(args) >= 3 and isinstance(args[2], str))
+        if legacy_shape:
+            # Previous Python/Java API: (page_no, page_size, card_type, card_organization, card_bin, area_code).
+            values = dict.fromkeys(names, None)
+            values.update(dict(zip(legacy_names, args)))
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(f"CardBinsRequest got an unexpected keyword argument {unexpected!r}")
+            for name, value in kwargs.items():
+                if name in legacy_names[: len(args)]:
+                    raise TypeError(f"CardBinsRequest got multiple values for argument {name!r}")
+                values[name] = value
+        else:
+            values = {name: None for name in names}
+            for name, value in zip(names, args):
+                values[name] = value
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(f"CardBinsRequest got an unexpected keyword argument {unexpected!r}")
+            for name, value in kwargs.items():
+                if name in names[: len(args)]:
+                    raise TypeError(f"CardBinsRequest got multiple values for argument {name!r}")
+                values[name] = value
+
+        for name in names:
+            object.__setattr__(self, name, values[name])
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class CardBinResponse:
     """Card BIN product information."""
 
     card_bin_id: Long | None = None
+    card_pool_id: Long | None = None
+    pool_name: str | None = None
     card_type: str | None = None
     currency_code: str | None = None
     area_code: str | None = None
@@ -374,6 +579,69 @@ class CardBinResponse:
     applicable_scenarios: str | None = None
     custom_cardholder: int | None = None
     can_limit: int | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a response using either the pool-aware or legacy positional shape."""
+
+        names = (
+            "card_bin_id",
+            "card_pool_id",
+            "pool_name",
+            "card_type",
+            "currency_code",
+            "area_code",
+            "card_bin",
+            "card_organization",
+            "applicable_scenarios",
+            "custom_cardholder",
+            "can_limit",
+        )
+        if len(args) > len(names):
+            raise TypeError(f"CardBinResponse expected at most {len(names)} arguments")
+
+        legacy_names = (
+            "card_bin_id",
+            "card_type",
+            "currency_code",
+            "area_code",
+            "card_bin",
+            "card_organization",
+            "applicable_scenarios",
+            "custom_cardholder",
+            "can_limit",
+        )
+        legacy_shape = (
+            2 <= len(args) < len(names)
+            and (isinstance(args[1], str) or args[1] is None)
+        )
+        if legacy_shape:
+            # Preserve the previous response shape for positional callers. The added pool
+            # fields are populated by keyword when present.
+            values = dict.fromkeys(names, None)
+            values.update(dict(zip(legacy_names, args)))
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(f"CardBinResponse got an unexpected keyword argument {unexpected!r}")
+            for name, value in kwargs.items():
+                if name in legacy_names[: len(args)]:
+                    raise TypeError(f"CardBinResponse got multiple values for argument {name!r}")
+                values[name] = value
+        else:
+            values = {name: None for name in names}
+            for name, value in zip(names, args):
+                values[name] = value
+            unknown = set(kwargs) - set(names)
+            if unknown:
+                unexpected = next(iter(sorted(unknown)))
+                raise TypeError(f"CardBinResponse got an unexpected keyword argument {unexpected!r}")
+            for name, value in kwargs.items():
+                if name in names[: len(args)]:
+                    raise TypeError(f"CardBinResponse got multiple values for argument {name!r}")
+                values[name] = value
+
+        for name in names:
+            object.__setattr__(self, name, values[name])
 
 
 @dataclass(frozen=True, slots=True, init=False)

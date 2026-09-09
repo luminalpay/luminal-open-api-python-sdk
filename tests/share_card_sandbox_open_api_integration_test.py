@@ -19,6 +19,7 @@ from typing import Any
 
 from luminal_open_api_sdk import (
     CardBinsRequest,
+    CardPoolRequest,
     CardGroupCreateRequest,
     CardGroupDeleteRequest,
     CardGroupRequest,
@@ -59,6 +60,7 @@ DEFAULT_BASE_URL = "https://sandbox-openapi.luminalads.com"
 SANDBOX_APP_ID = "lpizbghmayb1fzne"
 SANDBOX_APP_SECRET = "pYDU4q1YsCZRvutck3mMUYBesDxPKQIO"
 SANDBOX_CARD_BIN = "22346703"
+SHARED_CARD_TYPE = "SHARED"
 _LOGGER = logging.getLogger(__name__)
 _WEBHOOK_MAX_BODY_BYTES = 1024 * 1024
 _WEBHOOK_WAIT_SECONDS = float(os.getenv("LUMINAL_OPEN_API_WEBHOOK_WAIT_SECONDS", "30"))
@@ -75,6 +77,7 @@ _CACHED_CLIENT: LuminalOpenApiClient | None = None
 _CACHED_TOKEN: str | None = None
 _CACHED_AUTH_TOKEN: Any = None
 _CACHED_CARD_BIN: Any = None
+_CACHED_CARD_POOL: Any = None
 _CACHED_SHARED_ACCOUNT: Any = None
 _CACHED_BALANCE_SHARED_ACCOUNT: Any = None
 _CACHED_SHARED_ACCOUNT_INCREASE: Any = None
@@ -86,9 +89,11 @@ _CARD_GROUP_CREATE_ERROR: LuminalApiException | None = None
 _CACHED_DELETE_CARD_GROUP: Any = None
 _DELETE_CARD_GROUP_CREATE_ATTEMPTED = False
 _DELETE_CARD_GROUP_CREATE_ERROR: LuminalApiException | None = None
+_CACHED_CARD_ID: Any = None
 _CACHED_ISSUE_TASK_ID: int | None = None
 _CACHED_ISSUE_ERROR: Exception | None = None
 _ISSUE_ATTEMPTED = False
+_CARD_POOL_FLOW = False
 _SANDBOX_URLOPEN = urllib.request.build_opener(
     urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
 ).open
@@ -229,8 +234,58 @@ class _WebhookRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+def reset_flow_state() -> None:
+    """Reset cached Sandbox resources so the fixed-BIN and pool flows are isolated."""
+
+    global _WEBHOOK_ERROR, _CACHED_CLIENT, _CACHED_TOKEN, _CACHED_AUTH_TOKEN
+    global _CACHED_CARD_BIN, _CACHED_CARD_POOL, _CACHED_SHARED_ACCOUNT
+    global _CACHED_BALANCE_SHARED_ACCOUNT, _CACHED_SHARED_ACCOUNT_INCREASE
+    global _SHARED_ACCOUNT_CREATE_ATTEMPTED, _SHARED_ACCOUNT_CREATE_ERROR
+    global _CACHED_CARD_GROUP, _CARD_GROUP_CREATE_ATTEMPTED, _CARD_GROUP_CREATE_ERROR
+    global _CACHED_DELETE_CARD_GROUP, _DELETE_CARD_GROUP_CREATE_ATTEMPTED, _DELETE_CARD_GROUP_CREATE_ERROR
+    global _CACHED_CARD_ID, _CACHED_ISSUE_TASK_ID, _CACHED_ISSUE_ERROR, _ISSUE_ATTEMPTED, _CARD_POOL_FLOW
+
+    with _WEBHOOK_CONDITION:
+        _CARD_OPEN_WEBHOOKS.clear()
+        _CARD_STATUS_WEBHOOKS.clear()
+        _SHARED_ACCOUNT_OPEN_WEBHOOKS.clear()
+        _SHARED_ACCOUNT_TRANSACTION_WEBHOOKS.clear()
+        _WEBHOOK_ERROR = None
+        _WEBHOOK_CONDITION.notify_all()
+
+    _CACHED_CLIENT = None
+    _CACHED_TOKEN = None
+    _CACHED_AUTH_TOKEN = None
+    _CACHED_CARD_BIN = None
+    _CACHED_CARD_POOL = None
+    _CACHED_SHARED_ACCOUNT = None
+    _CACHED_BALANCE_SHARED_ACCOUNT = None
+    _CACHED_SHARED_ACCOUNT_INCREASE = None
+    _SHARED_ACCOUNT_CREATE_ATTEMPTED = False
+    _SHARED_ACCOUNT_CREATE_ERROR = None
+    _CACHED_CARD_GROUP = None
+    _CARD_GROUP_CREATE_ATTEMPTED = False
+    _CARD_GROUP_CREATE_ERROR = None
+    _CACHED_DELETE_CARD_GROUP = None
+    _DELETE_CARD_GROUP_CREATE_ATTEMPTED = False
+    _DELETE_CARD_GROUP_CREATE_ERROR = None
+    _CACHED_CARD_ID = None
+    _CACHED_ISSUE_TASK_ID = None
+    _CACHED_ISSUE_ERROR = None
+    _ISSUE_ATTEMPTED = False
+    _CARD_POOL_FLOW = False
+
+
+def use_card_pool_flow() -> None:
+    """Switch the shared-card Sandbox helpers to card-pool resource selection."""
+
+    global _CARD_POOL_FLOW
+    _CARD_POOL_FLOW = True
+
+
 def setUpModule() -> None:
     global _WEBHOOK_SERVER, _WEBHOOK_THREAD
+    reset_flow_state()
     host = os.getenv("LUMINAL_OPEN_API_WEBHOOK_HOST", "0.0.0.0")
     port = int(os.getenv("LUMINAL_OPEN_API_WEBHOOK_PORT", "18081"))
     _WEBHOOK_SERVER = ThreadingHTTPServer((host, port), _WebhookRequestHandler)
@@ -243,11 +298,14 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
+    global _WEBHOOK_SERVER, _WEBHOOK_THREAD
     if _WEBHOOK_SERVER is not None:
         _WEBHOOK_SERVER.shutdown()
         _WEBHOOK_SERVER.server_close()
+        _WEBHOOK_SERVER = None
     if _WEBHOOK_THREAD is not None:
         _WEBHOOK_THREAD.join(timeout=5)
+        _WEBHOOK_THREAD = None
 
 
 def _await_webhook(store: dict[str, Any], key: Any, operation: str) -> Any:
@@ -445,6 +503,33 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
         self.assertTrue(page.list, f"{label} returned no rows")
         return page.list[0]
 
+    def _selected_card_pool(self) -> Any:
+        global _CACHED_CARD_POOL
+        if not _CARD_POOL_FLOW:
+            return None
+        if _CACHED_CARD_POOL is None:
+            pools = self._authenticated_client().card_pools.list(CardPoolRequest())
+            self.assertIsNotNone(pools)
+            self.assertTrue(pools, "No available card pool was returned by Sandbox")
+            _CACHED_CARD_POOL = next(
+                (pool for pool in pools if pool is not None),
+                None,
+            )
+            self.assertIsNotNone(_CACHED_CARD_POOL, "No available card pool was returned by Sandbox")
+            self.assertIsNotNone(_CACHED_CARD_POOL.card_pool_id, "Selected card pool ID is missing")
+        return _CACHED_CARD_POOL
+
+    def _current_card_pool_id(self) -> Any:
+        if not _CARD_POOL_FLOW:
+            return None
+        pool = self._selected_card_pool()
+        self.assertIsNotNone(pool.card_pool_id, "Card pool ID is missing")
+        return pool.card_pool_id
+
+    @staticmethod
+    def _shared_account_amount() -> Decimal:
+        return Decimal("100.00")
+
     def _first_card(self) -> Any:
         page = self._authenticated_client().cards.list(
             MemberCardPageRequest(
@@ -519,6 +604,7 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
         self.assertEqual(expected, webhook.card_status.upper())
 
     def _await_card_issue(self, task_id: Any) -> None:
+        global _CACHED_CARD_ID
         try:
             webhook = _await_webhook(_CARD_OPEN_WEBHOOKS, task_id, "card issuance")
         except TimeoutError:
@@ -536,6 +622,7 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
             )
             self.assertIsNotNone(result, "card issuance fallback returned no completed card")
             self.assertNotEqual("FAIL", result.card_status, result.message)
+            _CACHED_CARD_ID = result.member_card_id
             self._await_card_status(result.member_card_id, "ACTIVE")
             return
         self.assertEqual(str(task_id), str(webhook.card_apply_task_id))
@@ -550,6 +637,7 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
         )
         self.assertIsNotNone(confirmed, "issued card was absent from issue-details response")
         self.assertNotIn(confirmed.card_status, {None, "APPLYING"})
+        _CACHED_CARD_ID = result.member_card_id
         self._await_card_status(result.member_card_id, "ACTIVE")
 
     def _first_shared_account(self) -> Any:
@@ -559,10 +647,12 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
         if not _SHARED_ACCOUNT_CREATE_ATTEMPTED:
             _SHARED_ACCOUNT_CREATE_ATTEMPTED = True
             try:
+                card_bin = self._first_card_bin()
                 created = self._authenticated_client().shared_accounts.create(
                     CreateSharedAccountRequest(
-                        card_bin_id=self._first_card_bin().card_bin_id,
-                        recharge_amount=Decimal("1"),
+                        card_bin_id=card_bin.card_bin_id,
+                        card_pool_id=self._current_card_pool_id(),
+                        recharge_amount=self._shared_account_amount(),
                         account_name=f"sdk-sandbox-{uuid.uuid4().hex[:12]}",
                     )
                 )
@@ -574,7 +664,11 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
                 _SHARED_ACCOUNT_CREATE_ERROR = exc
         if _CACHED_SHARED_ACCOUNT is None:
             page = self._authenticated_client().shared_accounts.list(
-                SharedAccountPageRequest(page_no=1, page_size=10)
+                SharedAccountPageRequest(
+                    page_no=1,
+                    page_size=10,
+                    card_pool_id=self._current_card_pool_id(),
+                )
             )
             self._assert_page(page)
             _CACHED_SHARED_ACCOUNT = next(
@@ -584,6 +678,10 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
                     if getattr(item, "status", None) == "ACTIVE"
                        and str(getattr(item, "card_bin", "")) == SANDBOX_CARD_BIN
                        and getattr(item, "card_bin_id", None) == self._first_card_bin().card_bin_id
+                       and (
+                           not _CARD_POOL_FLOW
+                           or getattr(item, "card_pool_id", None) == self._current_card_pool_id()
+                       )
                 ),
                 None,
             )
@@ -649,7 +747,11 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
         page_no = 1
         while True:
             page = self._authenticated_client().shared_accounts.list(
-                SharedAccountPageRequest(page_no=page_no, page_size=100)
+                SharedAccountPageRequest(
+                    page_no=page_no,
+                    page_size=100,
+                    card_pool_id=self._current_card_pool_id(),
+                )
             )
             matches = [
                 item
@@ -657,6 +759,10 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
                 if getattr(item, "status", None) == "ACTIVE"
                    and str(getattr(item, "card_bin", "")) == SANDBOX_CARD_BIN
                    and getattr(item, "card_bin_id", None) == card_bin_id
+                   and (
+                       not _CARD_POOL_FLOW
+                       or getattr(item, "card_pool_id", None) == self._current_card_pool_id()
+                   )
                    and (getattr(item, "balance", None) or Decimal("0")) >= Decimal("1")
             ]
             if matches:
@@ -687,24 +793,61 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
     def _first_card_bin(self) -> Any:
         global _CACHED_CARD_BIN
         if _CACHED_CARD_BIN is None:
+            selected_pool_id = self._current_card_pool_id()
             page = self._authenticated_client().cards.bins(
                 CardBinsRequest(
                     page_no=1,
-                    page_size=10,
+                    page_size=20,
+                    card_pool_id=selected_pool_id,
                     card_type=self._card_type(),
                     card_bin=SANDBOX_CARD_BIN,
                 )
             )
             self._assert_page(page)
+            self.assertTrue(page.list, "No shared-card BIN was returned by Sandbox")
             _CACHED_CARD_BIN = next(
-                (item for item in page.list if str(item.card_bin) == SANDBOX_CARD_BIN),
+                (
+                    item
+                    for item in page.list
+                    if item is not None
+                    and str(getattr(item, "card_type", "")).upper() == SHARED_CARD_TYPE
+                    and (SANDBOX_CARD_BIN is None or str(item.card_bin) == SANDBOX_CARD_BIN)
+                    and (
+                        not _CARD_POOL_FLOW
+                        or getattr(item, "card_pool_id", None) == selected_pool_id
+                    )
+                ),
                 None,
             )
-            self.assertIsNotNone(_CACHED_CARD_BIN, f"cardBin {SANDBOX_CARD_BIN} not found")
+            self.assertIsNotNone(
+                _CACHED_CARD_BIN,
+                f"No matching shared-card BIN was returned by Sandbox: {SANDBOX_CARD_BIN}",
+            )
             self.assertIsNotNone(_CACHED_CARD_BIN.card_bin_id)
         return _CACHED_CARD_BIN
 
     def _first_active_card(self) -> Any:
+        if _CACHED_CARD_ID is not None:
+            page = self._authenticated_client().cards.list(
+                MemberCardPageRequest(
+                    page_no=1,
+                    page_size=1,
+                    member_card_id=_CACHED_CARD_ID,
+                    card_type=self._card_type(),
+                )
+            )
+            self._assert_page(page)
+            card = next(
+                (
+                    item
+                    for item in page.list
+                    if str(getattr(item, "member_card_id", "")) == str(_CACHED_CARD_ID)
+                ),
+                None,
+            )
+            self.assertIsNotNone(card, f"cards.list returned no card for memberCardId {_CACHED_CARD_ID}")
+            return card
+
         page = self._authenticated_client().cards.list(
             MemberCardPageRequest(
                 page_no=1,
@@ -758,7 +901,7 @@ class SandboxTransactionsApiTest(_SandboxIntegrationTestCase):
 
 class SandboxSharedAccountsApiTest(_SandboxIntegrationTestCase):
     def _card_type(self) -> str:
-        return os.getenv("LUMINAL_OPEN_API_CARD_TYPE", "SHARED")
+        return os.getenv("LUMINAL_OPEN_API_CARD_TYPE", SHARED_CARD_TYPE)
 
     def test_create_shared_account_from_sandbox(self) -> None:
         self._run_mutations()
@@ -766,10 +909,23 @@ class SandboxSharedAccountsApiTest(_SandboxIntegrationTestCase):
         self.assertTrue(result.member_shared_account_id)
 
     def test_list_shared_accounts_from_sandbox(self) -> None:
+        account = self._first_shared_account()
         result = self._authenticated_client().shared_accounts.list(
-            SharedAccountPageRequest(page_no=1, page_size=10)
+            SharedAccountPageRequest(
+                page_no=1,
+                page_size=10,
+                card_pool_id=self._current_card_pool_id(),
+            )
         )
         self._assert_page(result)
+        self.assertTrue(
+            any(
+                str(getattr(item, "member_shared_account_id", ""))
+                == str(account.member_shared_account_id)
+                for item in result.list
+            ),
+            "Created shared account was not returned by the account list",
+        )
 
     def test_increase_shared_account_from_sandbox(self) -> None:
         self._run_mutations()
@@ -792,22 +948,30 @@ class SandboxSharedAccountsApiTest(_SandboxIntegrationTestCase):
         self._await_shared_account_transaction(result.shared_account_transaction_id, account_id)
 
     def test_get_shared_account_details_from_sandbox(self) -> None:
+        account_id = self._first_shared_account().member_shared_account_id
         result = self._authenticated_client().shared_accounts.details(
-            SharedAccountGetRequest(member_shared_account_id=self._first_shared_account().member_shared_account_id)
+            SharedAccountGetRequest(member_shared_account_id=account_id)
         )
         self.assertIsNotNone(result)
-        self.assertTrue(result.member_shared_account_id)
+        self.assertEqual(account_id, result.member_shared_account_id)
+        self.assertEqual(self._first_card_bin().card_bin_id, result.card_bin_id)
+        if _CARD_POOL_FLOW:
+            self.assertEqual(self._current_card_pool_id(), result.card_pool_id)
 
     def test_list_shared_account_transactions_from_sandbox(self) -> None:
         result = self._authenticated_client().shared_accounts.transactions(
-            SharedAccountTransactionsRequest(page_no=1, page_size=10)
+            SharedAccountTransactionsRequest(
+                page_no=1,
+                page_size=10,
+                member_shared_account_id=self._first_shared_account().member_shared_account_id,
+            )
         )
         self._assert_page(result)
 
 
 class SandboxCardsApiTest(_SandboxIntegrationTestCase):
     def _card_type(self) -> str:
-        return os.getenv("LUMINAL_OPEN_API_CARD_TYPE", "SHARED")
+        return os.getenv("LUMINAL_OPEN_API_CARD_TYPE", SHARED_CARD_TYPE)
 
     def _issue_request(self) -> IssueCardRequest:
         card_bin = self._first_card_bin()
@@ -888,11 +1052,40 @@ YSl1QnrMvJj2mvDWk5nntw==
         except LuminalApiException as exc:
             self.assertIn("signature error", str(exc).lower())
 
-    def test_list_cards_from_sandbox(self) -> None:
-        result = self._authenticated_client().cards.list(
-            MemberCardPageRequest(page_no=1, page_size=10, card_type=self._card_type())
+    def test_list_card_bins_from_sandbox(self) -> None:
+        result = self._authenticated_client().cards.bins(
+            CardBinsRequest(
+                page_no=1,
+                page_size=20,
+                card_pool_id=self._current_card_pool_id(),
+                card_type=SHARED_CARD_TYPE,
+                card_bin=SANDBOX_CARD_BIN,
+            )
         )
         self._assert_page(result)
+        self.assertTrue(
+            any(
+                getattr(item, "card_bin_id", None) == self._first_card_bin().card_bin_id
+                for item in result.list
+            ),
+            "Selected shared-card BIN was not returned by the BIN list",
+        )
+
+    def test_list_cards_from_sandbox(self) -> None:
+        card_id = self._first_active_card().member_card_id
+        result = self._authenticated_client().cards.list(
+            MemberCardPageRequest(
+                page_no=1,
+                page_size=10,
+                member_card_id=card_id,
+                card_type=self._card_type(),
+            )
+        )
+        self._assert_page(result)
+        self.assertTrue(
+            any(getattr(item, "member_card_id", None) == card_id for item in result.list),
+            "Issued shared card was not returned by the card list",
+        )
 
     def test_get_card_cvv_from_sandbox(self) -> None:
         try:
@@ -900,13 +1093,21 @@ YSl1QnrMvJj2mvDWk5nntw==
                 CardIdRequest(member_card_id=self._first_active_card().member_card_id)
             )
             self.assertIsNotNone(result)
-            self.assertTrue(result.member_card_id)
+            self.assertEqual(self._first_active_card().member_card_id, result.member_card_id)
+            self.assertTrue(result.card_no)
+            self.assertTrue(result.cvv)
+            self.assertTrue(result.expiry_date)
         except LuminalApiException as exc:
             self.assertIn("does not support this operation", str(exc).lower())
 
     def test_list_card_transactions_from_sandbox(self) -> None:
         result = self._authenticated_client().cards.transactions(
-            CardTransactionsRequest(page_no=1, page_size=10, card_type=self._card_type())
+            CardTransactionsRequest(
+                page_no=1,
+                page_size=10,
+                card_type=SHARED_CARD_TYPE,
+                member_card_id=self._first_active_card().member_card_id,
+            )
         )
         self._assert_page(result)
 
@@ -915,7 +1116,7 @@ YSl1QnrMvJj2mvDWk5nntw==
             CardIdRequest(member_card_id=self._first_active_card().member_card_id)
         )
         self.assertIsNotNone(result)
-        self.assertTrue(result.member_card_id)
+        self.assertEqual(self._first_active_card().member_card_id, result.member_card_id)
 
     def test_modify_card_limit_from_sandbox(self) -> None:
         self._run_mutations()
@@ -1032,6 +1233,11 @@ YSl1QnrMvJj2mvDWk5nntw==
             result = self._authenticated_client().cards.issue_details(IssueCardDetailsRequest(task_id=task_id))
             self.assertIsNotNone(result)
             self.assertIsInstance(result, list)
+            card_id = self._first_active_card().member_card_id
+            self.assertTrue(
+                any(getattr(item, "member_card_id", None) == card_id for item in result),
+                "Issued card was absent from issue-details response",
+            )
         except LuminalApiException as exc:
             self.assertIn("signature error", str(exc).lower())
 
@@ -1084,6 +1290,7 @@ _TEST_ORDER = (
     (SandboxSharedAccountsApiTest, "test_list_shared_accounts_from_sandbox"),
     (SandboxSharedAccountsApiTest, "test_get_shared_account_details_from_sandbox"),
     (SandboxSharedAccountsApiTest, "test_list_shared_account_transactions_from_sandbox"),
+    (SandboxCardsApiTest, "test_list_card_bins_from_sandbox"),
     (SandboxCardsApiTest, "test_list_cards_from_sandbox"),
     (SandboxCardsApiTest, "test_get_card_cvv_from_sandbox"),
     (SandboxCardsApiTest, "test_list_card_transactions_from_sandbox"),
@@ -1103,6 +1310,7 @@ assert tuple(
 ) == (
     "test_issue_card_from_sandbox",
     "test_wait_for_card_open_status_webhook_from_sandbox",
+    "test_list_card_bins_from_sandbox",
     "test_list_cards_from_sandbox",
     "test_get_card_cvv_from_sandbox",
     "test_list_card_transactions_from_sandbox",

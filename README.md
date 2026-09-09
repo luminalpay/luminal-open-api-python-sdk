@@ -49,6 +49,37 @@ client.cards.recharge(MemberCardRechargeRequest(123, Decimal("50.00"), "funding"
 
 The client accepts a gateway context path in `base_url`. Query strings and fragments are rejected.
 
+Card-pool shared-account opening:
+
+```python
+from decimal import Decimal
+
+from luminal_open_api_sdk import CardBinsRequest, CardPoolRequest, CreateSharedAccountRequest
+
+pools = client.card_pools.list(CardPoolRequest())
+pool = pools[0]
+bins = client.cards.bins(
+    CardBinsRequest(
+        page_no=1,
+        page_size=20,
+        card_pool_id=pool.card_pool_id,
+        card_type="SHARED",
+    )
+)
+card_bin = bins.list[0]
+created = client.shared_accounts.create(
+    CreateSharedAccountRequest(
+        card_bin_id=card_bin.card_bin_id,
+        card_pool_id=pool.card_pool_id,
+        recharge_amount=Decimal("100.00"),
+        account_name="Main",
+    )
+)
+```
+
+`CardPoolRequest` only carries pool-level filters. Resolve a BIN after selecting the pool. Shared-account creation
+may use `card_pool_id` when the BIN is selected from a pool; card issuance continues to require `card_bin_id`.
+
 ## Java `Long` serialization
 
 Only fields typed as the SDK's `Long` marker use the JavaScript safe-integer compatibility rule for request
@@ -91,6 +122,7 @@ The rule applies to typed `Long` request fields during normal transmission. It a
 | `AuthApi`           | `logout`        | `POST /open-api/v1/auth/logout`                 |
 | `AccountsApi`       | `list`          | `POST /open-api/v1/accounts`                    |
 | `TransactionsApi`   | `list`          | `POST /open-api/v1/transactions/list`           |
+| `CardPoolsApi`      | `list`          | `POST /open-api/v1/cards/pools`                 |
 | `SharedAccountsApi` | `create`        | `POST /open-api/v1/shared-account/create`       |
 | `SharedAccountsApi` | `list`          | `POST /open-api/v1/shared-account/list`         |
 | `SharedAccountsApi` | `increase`      | `POST /open-api/v1/shared-account/increase`     |
@@ -207,7 +239,7 @@ Each controller endpoint has an independent `unittest.TestCase` class. Each webh
 
 ### Sandbox integration tests
 
-`tests/share_card_sandbox_open_api_integration_test.py` performs real HTTP requests against the shared-card SDK flow:
+`tests/share_card_sandbox_open_api_integration_test.py` performs real HTTP requests against the fixed-BIN shared-card SDK flow:
 
 - Auth: `get_token`, `refresh_token`, `logout`
 - Accounts: `list`
@@ -216,6 +248,10 @@ Each controller endpoint has an independent `unittest.TestCase` class. Each webh
 - Cards: `bins`, `issue`, `list`, `cvv`, `transactions`, `limit`, `modify_limit`, `freeze`, `unfreeze`, `cancel`,
   `issue_details`
 - Card groups: `list`, `create`, `update`, `delete`
+
+`tests/card_pool_shared_account_sandbox_open_api_integration_test.py` runs the same complete shared-card flow after
+caching the plain card-pool list, selecting its first pool, resolving the fixed SHARED BIN `22346703`, and creating
+the shared account with an initial amount of `100.00`.
 
 Read-only endpoints run with only app credentials. The sandbox test class caches one authenticated client, reuses its
 token, and refreshes it automatically when the token is near expiry or the API returns unauthorized. Side-effecting
@@ -237,6 +273,7 @@ PowerShell:
 ```powershell
 $env:LUMINAL_OPEN_API_LOG_HTTP = "1"
 python -m unittest tests.share_card_sandbox_open_api_integration_test -v
+python -m unittest tests.card_pool_shared_account_sandbox_open_api_integration_test -v
 ```
 
 The recharge-card flow is covered separately by

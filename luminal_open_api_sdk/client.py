@@ -29,6 +29,8 @@ from .models import (
     CardIdRequest,
     CardLimitResponse,
     CardLimitUpdateRequest,
+    CardPoolRequest,
+    CardPoolResponse,
     CardTransactionResponse,
     CardTransactionsRequest,
     CreateSharedAccountRequest,
@@ -271,6 +273,23 @@ class SharedAccountsApi:
 
     def _action(self, path: str, request: Any) -> bool:
         return self._transport.post(self._PATH + path, _require_request(request), decoder=_decode_bool)
+
+
+class CardPoolsApi:
+    """Card-pool endpoints."""
+
+    _PATH = "/open-api/v1/cards/pools"
+
+    def __init__(self, transport: HttpTransport) -> None:
+        self._transport = transport
+
+    def list(self, request: CardPoolRequest) -> list[CardPoolResponse] | None:
+        """List card pools available to the current member."""
+        return self._transport.post(
+            self._PATH,
+            _require_request(request),
+            decoder=lambda data: _decode_list(data, CardPoolResponse),
+        )
 
 
 class CardsApi:
@@ -555,6 +574,7 @@ class LuminalOpenApiClient:
         self.accounts = AccountsApi(transport)
         self.transactions = TransactionsApi(transport)
         self.shared_accounts = SharedAccountsApi(transport)
+        self.card_pools = CardPoolsApi(transport)
         self.cards = CardsApi(transport)
         self.card_holders = CardHoldersApi(transport)
         self.card_groups = CardGroupsApi(transport)

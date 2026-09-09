@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from decimal import Decimal
 
 from luminal_open_api_sdk import (
+    CardPoolRequest,
     CardBinsRequest,
     CardGroupCreateRequest,
     CardGroupDeleteRequest,
@@ -17,6 +19,7 @@ from luminal_open_api_sdk import (
     CreateSharedAccountRequest,
     IssueCardDetailsRequest,
     IssueCardRequest,
+    LuminalOpenApiClient,
     MemberCardPageRequest,
     SharedAccountBalanceRequest,
     SharedAccountGetRequest,
@@ -31,12 +34,14 @@ from luminal_open_api_sdk import (
 )
 
 from tests.support import (
+    FakeResponse,
     PRIVATE_KEY_PEM,
     PUBLIC_KEY_PEM,
     assert_request_contract,
     body_text,
     client_for,
     request_header,
+    SequenceOpener,
 )
 
 
@@ -113,6 +118,30 @@ class SharedAccountCreateEndpointTest(unittest.TestCase):
         )
 
 
+class CardPoolListEndpointTest(unittest.TestCase):
+    def test_list_contract(self) -> None:
+        client, opener = client_for([
+            {
+                "cardPoolId": 9001,
+                "poolName": "Main Pool",
+                "availableCount": 1,
+                "sharedAccountCount": 0,
+                "cardBins": ["4416"],
+                "canApplyAccount": 1,
+                "canApply": 0,
+            }
+        ])
+        result = client.card_pools.list(CardPoolRequest())
+        self.assertEqual(9001, result[0].card_pool_id)
+        self.assertEqual(["4416"], result[0].card_bins)
+        assert_request_contract(
+            self,
+            opener,
+            "/open-api/v1/cards/pools",
+            "{}",
+        )
+
+
 class SharedAccountListEndpointTest(unittest.TestCase):
     def test_list_contract(self) -> None:
         client, opener = client_for({"total": 1, "list": [{"accountName": "Travel"}], "extra": None})
@@ -123,6 +152,34 @@ class SharedAccountListEndpointTest(unittest.TestCase):
             opener,
             "/open-api/v1/shared-account/list",
             '{"pageNo":1,"pageSize":10}',
+        )
+
+    def test_list_supports_card_pool_filter_and_response_fields(self) -> None:
+        client, opener = client_for(
+            {
+                "total": 1,
+                "list": [
+                    {
+                        "memberSharedAccountId": 2001,
+                        "accountName": "Main",
+                        "cardBinId": 1001,
+                        "cardPoolId": 9001,
+                        "poolName": "Main Pool",
+                    }
+                ],
+                "extra": None,
+            }
+        )
+        result = client.shared_accounts.list(
+            SharedAccountPageRequest(page_no=1, page_size=20, card_pool_id=9001)
+        )
+        self.assertEqual(9001, result.list[0].card_pool_id)
+        self.assertEqual("Main Pool", result.list[0].pool_name)
+        assert_request_contract(
+            self,
+            opener,
+            "/open-api/v1/shared-account/list",
+            '{"cardPoolId":9001,"pageNo":1,"pageSize":20}',
         )
 
 
@@ -191,6 +248,137 @@ class CardBinsEndpointTest(unittest.TestCase):
             '{"areaCode":"US","cardBin":"123456","cardOrganization":"VISA","cardType":"SHARED","pageNo":1,"pageSize":10}',
         )
 
+    def test_bins_support_card_pool_filter_and_response_fields(self) -> None:
+        client, opener = client_for(
+            {
+                "total": 1,
+                "list": [
+                    {
+                        "cardBinId": 1001,
+                        "cardPoolId": 9001,
+                        "poolName": "Main Pool",
+                        "cardType": "SHARED",
+                        "cardBin": "4416",
+                    }
+                ],
+                "extra": None,
+            }
+        )
+        result = client.cards.bins(CardBinsRequest(1, 20, 9001, "SHARED", None, None, None))
+        self.assertEqual(1001, result.list[0].card_bin_id)
+        self.assertEqual(9001, result.list[0].card_pool_id)
+        self.assertEqual("Main Pool", result.list[0].pool_name)
+        assert_request_contract(
+            self,
+            opener,
+            "/open-api/v1/cards/bins",
+            '{"cardPoolId":9001,"cardType":"SHARED","pageNo":1,"pageSize":20}',
+        )
+
+
+class CardPoolSharedAccountFlowEndpointTest(unittest.TestCase):
+    def test_opens_shared_account_from_cached_pool(self) -> None:
+        def envelope(data):
+            return FakeResponse(
+                json.dumps({"code": 0, "msg": "success", "data": data}).encode()
+            )
+
+        opener = SequenceOpener(
+            envelope([
+                {
+                    "cardPoolId": 9001,
+                    "poolName": "Main Pool",
+                    "availableCount": 1,
+                    "sharedAccountCount": 0,
+                    "cardBins": ["4416"],
+                    "canApplyAccount": 1,
+                    "canApply": 0,
+                }
+            ]),
+            envelope({
+                "total": 1,
+                "list": [{
+                    "cardBinId": 1001,
+                    "cardPoolId": 9001,
+                    "poolName": "Main Pool",
+                    "cardBin": "4416",
+                    "cardType": "SHARED",
+                }],
+                "extra": None,
+            }),
+            envelope({"memberSharedAccountId": 2001}),
+        )
+        client = LuminalOpenApiClient("https://api.example.test", "access-token", opener=opener)
+
+        pools = client.card_pools.list(CardPoolRequest())
+        selected_pool = pools[0]
+        bins = client.cards.bins(
+            CardBinsRequest(1, 20, selected_pool.card_pool_id, "SHARED", None, None, None)
+        )
+        created = client.shared_accounts.create(
+            CreateSharedAccountRequest(None, selected_pool.card_pool_id, Decimal("100.00"), "Main")
+        )
+
+        self.assertEqual(1001, bins.list[0].card_bin_id)
+        self.assertEqual(2001, created.member_shared_account_id)
+        self.assertEqual(3, len(opener.requests))
+        self.assertNotIn(b'"cardBinId"', opener.requests[0].data or b"")
+        self.assertIn(b'"cardPoolId":9001', opener.requests[1].data or b"")
+        self.assertIn(b'"cardPoolId":9001', opener.requests[2].data or b"")
+        self.assertNotIn(b'"cardBinId"', opener.requests[2].data or b"")
+
+    def test_opens_shared_account_with_card_bin_and_pool(self) -> None:
+        def envelope(data):
+            return FakeResponse(
+                json.dumps({"code": 0, "msg": "success", "data": data}).encode()
+            )
+
+        opener = SequenceOpener(
+            envelope([
+                {
+                    "cardPoolId": 9001,
+                    "poolName": "Main Pool",
+                    "availableCount": 1,
+                    "sharedAccountCount": 0,
+                    "cardBins": ["4416"],
+                    "canApplyAccount": 1,
+                    "canApply": 0,
+                }
+            ]),
+            envelope({
+                "total": 1,
+                "list": [{
+                    "cardBinId": 1001,
+                    "cardPoolId": 9001,
+                    "poolName": "Main Pool",
+                    "cardBin": "4416",
+                    "cardType": "SHARED",
+                }],
+                "extra": None,
+            }),
+            envelope({"memberSharedAccountId": 2001}),
+        )
+        client = LuminalOpenApiClient("https://api.example.test", "access-token", opener=opener)
+
+        selected_pool = client.card_pools.list(CardPoolRequest())[0]
+        selected_bin = client.cards.bins(
+            CardBinsRequest(1, 20, selected_pool.card_pool_id, "SHARED", None, None, None)
+        ).list[0]
+        self.assertEqual(selected_pool.card_pool_id, selected_bin.card_pool_id)
+        created = client.shared_accounts.create(
+            CreateSharedAccountRequest(
+                selected_bin.card_bin_id,
+                selected_pool.card_pool_id,
+                Decimal("100.00"),
+                "Main with BIN",
+            )
+        )
+
+        self.assertEqual(2001, created.member_shared_account_id)
+        self.assertEqual(3, len(opener.requests))
+        self.assertIn(b'"cardBinId":1001', opener.requests[2].data or b"")
+        self.assertIn(b'"cardPoolId":9001', opener.requests[2].data or b"")
+
 
 class CardIssueEndpointTest(unittest.TestCase):
     def test_issue_contract(self) -> None:
@@ -233,6 +421,14 @@ class CardIssueEndpointTest(unittest.TestCase):
         client, _ = client_for("2064991632710991874")
         request = IssueCardRequest(1, 2, 3, "Travel", "SHARED", 4, None, Decimal("100.00"))
         self.assertEqual(2_064_991_632_710_991_874, client.cards.issue(request, "precomputed-signature"))
+
+class SharedAccountSelectorValidationTest(unittest.TestCase):
+    def test_create_requires_at_least_one_card_selector(self) -> None:
+        with self.assertRaisesRegex(ValueError, "At least one"):
+            CreateSharedAccountRequest(
+                recharge_amount=Decimal("100.00"),
+                account_name="Invalid",
+            )
 
 
 class CardListEndpointTest(unittest.TestCase):
