@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 
 from luminal_open_api_sdk import (
     CardOpenStatusWebhook,
     CardStatusWebhook,
+    RechargeCardTransferStatusWebhook,
     SharedAccountOpenStatusWebhook,
     TransactionWebhook,
     WebhookEventType,
     WebhookReplayGuard,
     WebhookVerificationException,
     WebhookVerifier,
+    WalletTransactionWebhook,
     read_private_key,
     read_public_key,
     sign,
@@ -47,6 +50,74 @@ class CardStatusWebhookTest(unittest.TestCase):
         event = WebhookVerifier.parse(WebhookEventType.CARD_STATUS, "evt-2", body, signature, PUBLIC_KEY_PEM)
         self.assertIsInstance(event.payload, CardStatusWebhook)
         self.assertEqual("ACTIVE", event.payload.card_status)
+
+
+class WalletTransactionsWebhookTest(unittest.TestCase):
+    def test_verifies_and_decodes_wallet_transaction_payload(self) -> None:
+        body = (
+            b'{"transactionNo":10001,"memberNo":9,"walletNo":11,'
+            b'"orderNo":"ORD-20260701-01","type":101,"direction":1,'
+            b'"amount":12.34,"fee":0.12,"currency":"USD",'
+            b'"beforeBalance":100,"afterBalance":112.22,"status":1,'
+            b'"remark":"deposit","createTime":"2026-07-01T10:15:30",'
+            b'"memberCardId":5,"cardNumber":"****1234"}'
+        )
+        signature = sign(body, read_private_key(PRIVATE_KEY_PEM))
+
+        event = WebhookVerifier.parse(
+            WebhookEventType.WALLET_TRANSACTIONS,
+            "evt-wallet-1",
+            body,
+            signature,
+            PUBLIC_KEY_PEM,
+        )
+
+        self.assertEqual(WebhookEventType.WALLET_TRANSACTIONS, event.type)
+        self.assertIsInstance(event.payload, WalletTransactionWebhook)
+        self.assertEqual(10001, event.payload.transaction_no)
+        self.assertEqual(9, event.payload.member_no)
+        self.assertEqual(11, event.payload.wallet_no)
+        self.assertEqual("ORD-20260701-01", event.payload.order_no)
+        self.assertEqual(101, event.payload.type)
+        self.assertEqual(1, event.payload.direction)
+        self.assertEqual(Decimal("12.34"), event.payload.amount)
+        self.assertEqual(Decimal("0.12"), event.payload.fee)
+        self.assertEqual("USD", event.payload.currency)
+        self.assertEqual(Decimal("100"), event.payload.before_balance)
+        self.assertEqual(Decimal("112.22"), event.payload.after_balance)
+        self.assertEqual(1, event.payload.status)
+        self.assertEqual("deposit", event.payload.remark)
+        self.assertEqual("2026-07-01T10:15:30", event.payload.create_time.isoformat())
+        self.assertEqual(5, event.payload.member_card_id)
+        self.assertEqual("****1234", event.payload.card_number)
+
+
+class RechargeCardLimitWebhookTest(unittest.TestCase):
+    def test_decodes_recharge_card_limit_fields(self) -> None:
+        body = (
+            b'{"memberCardOperationRecordId":603,"memberCardId":5,'
+            b'"cardType":"RECHARGE","operationType":"MODIFY_LIMITS",'
+            b'"totalLimit":100,"dailyLimit":50,"monthLimit":500,'
+            b'"status":"SUCCESS","message":"limit updated",'
+            b'"updateTime":"2026-09-01T10:15:30"}'
+        )
+        signature = sign(body, read_private_key(PRIVATE_KEY_PEM))
+
+        event = WebhookVerifier.parse(
+            WebhookEventType.CARD_LIMIT_STATUS,
+            "evt-limit-1",
+            body,
+            signature,
+            PUBLIC_KEY_PEM,
+        )
+
+        self.assertIsInstance(event.payload, RechargeCardTransferStatusWebhook)
+        self.assertEqual(603, event.payload.member_card_operation_record_id)
+        self.assertEqual("MODIFY_LIMITS", event.payload.operation_type)
+        self.assertEqual(Decimal("100"), event.payload.total_limit)
+        self.assertEqual(Decimal("50"), event.payload.daily_limit)
+        self.assertEqual(Decimal("500"), event.payload.month_limit)
+        self.assertEqual("SUCCESS", event.payload.status)
 
 
 class CardOpenStatusWebhookTest(unittest.TestCase):

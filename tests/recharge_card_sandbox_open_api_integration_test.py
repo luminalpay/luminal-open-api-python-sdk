@@ -48,6 +48,7 @@ from luminal_open_api_sdk import (
     RechargeCardOperationRecordResponse,
     RechargeCardTransferStatusWebhook,
     TransactionWebhook,
+    WalletTransactionWebhook,
     WebhookEventType,
     read_private_key,
 )
@@ -56,7 +57,7 @@ from tests.support import SANDBOX_WEBHOOK_PUBLIC_KEY_PEM
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d %(message)s",
+    format="%(asctime)s %(levelname)s %(n ame)s %(filename)s:%(lineno)d %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
@@ -79,6 +80,7 @@ _CARD_STATUS_WEBHOOKS: dict[str, CardStatusWebhook] = {}
 _TRANSFER_WEBHOOKS: dict[str, RechargeCardTransferStatusWebhook] = {}
 _TRANSACTION_WEBHOOKS: dict[str, TransactionWebhook] = {}
 _SETTLEMENT_WEBHOOKS: dict[str, TransactionWebhook] = {}
+_WALLET_TRANSACTION_EVENTS: list[WalletTransactionWebhook] = []
 _WEBHOOK_ERROR: Exception | None = None
 _WEBHOOK_SERVER: ThreadingHTTPServer | None = None
 _WEBHOOK_THREAD: threading.Thread | None = None
@@ -181,6 +183,13 @@ def _record_webhook(event_type: WebhookEventType, payload: Any) -> None:
             _TRANSACTION_WEBHOOKS[str(payload.member_card_id)] = payload
         elif event_type is WebhookEventType.CARD_SETTLE_STATUS:
             _SETTLEMENT_WEBHOOKS[str(payload.member_card_transaction_id)] = payload
+        elif event_type is WebhookEventType.WALLET_TRANSACTIONS:
+            _WALLET_TRANSACTION_EVENTS.append(payload)
+            _LOGGER.info(
+                "Recorded wallet transaction webhook transactionNo=%s orderNo=%s",
+                payload.transaction_no,
+                payload.order_no,
+            )
         _WEBHOOK_CONDITION.notify_all()
 
 
@@ -223,8 +232,10 @@ class _WebhookRequestHandler(BaseHTTPRequestHandler):
             WebhookEventType.CARD_LIMIT_STATUS,
             WebhookEventType.CARD_TRANSACTIONS,
             WebhookEventType.CARD_SETTLE_STATUS,
+            WebhookEventType.WALLET_TRANSACTIONS,
         }
         if event_type not in supported:
+            _LOGGER.info("Ignoring unsupported webhook event=%s", event_name)
             self._respond(200)
             return
         try:
@@ -241,6 +252,11 @@ class _WebhookRequestHandler(BaseHTTPRequestHandler):
                 public_key,
             )
             _record_webhook(event_type, event.payload)
+            _LOGGER.info(
+                "Received webhook event=%s eventId=%s",
+                event_type,
+                self.headers.get("event_id", ""),
+            )
         except Exception as exc:
             _record_webhook_error(exc)
             self._respond(400)
@@ -323,6 +339,15 @@ def _is_failed_card_status(status: str | None) -> bool:
         "RISK_CANCEL",
         "ADMIN_CANCEL",
     }
+
+
+def _validate_recharge_card_limit_webhook(payload: RechargeCardTransferStatusWebhook) -> None:
+    if payload.total_limit is None:
+        raise AssertionError("Recharge-card limit webhook totalLimit is missing")
+    if payload.daily_limit is None:
+        raise AssertionError("Recharge-card limit webhook dailyLimit is missing")
+    if payload.month_limit is None:
+        raise AssertionError("Recharge-card limit webhook monthLimit is missing")
 
 
 class RechargeCardSandboxOpenApiIntegrationTest(unittest.TestCase):
@@ -789,6 +814,8 @@ YSl1QnrMvJj2mvDWk5nntw==
                 f"{expected_type} operationRecordId={operation_id}",
             )
             self._validate_transfer(operation_id, expected_type, payload)
+            if expected_type.upper() == LIMIT_OPERATION_TYPE:
+                _validate_recharge_card_limit_webhook(payload)
             return self._operation_from_webhook(payload)
         except TimeoutError as timeout:
             deadline = time.monotonic() + self._webhook_wait_seconds()

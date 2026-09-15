@@ -156,6 +156,8 @@ The rule applies to typed `Long` request fields during normal transmission. It a
 | `CardGroupsApi`     | `update`        | `POST /open-api/v1/cards/group/update`          |
 | `CardGroupsApi`     | `delete`        | `POST /open-api/v1/cards/group/delete`          |
 
+`TransactionsApi.list` supports type, order-number, time, and member-card filters.
+
 All API responses must use the Luminal envelope:
 
 ```json
@@ -211,6 +213,7 @@ print(verified.type, verified.event_id, verified.payload)
 
 Supported event headers:
 
+- `WALLET_TRANSACTIONS` → `WalletTransactionWebhook`
 - `CARD_TRANSACTIONS` → `TransactionWebhook`
 - `CARD_SETTLE_STATUS` → `TransactionWebhook`
 - `CARD_STATUS` → `CardStatusWebhook`

@@ -78,15 +78,52 @@ class RefreshTokenRequest:
         return "RefreshTokenRequest(refresh_token='<redacted>')"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class WalletTransactionRequest:
     """Filters for the wallet-transaction list endpoint."""
 
     page_no: int | None = None
     page_size: int | None = None
     type: int | None = None
+    order_no: str | None = None
     create_time: list[datetime] | None = None
     member_card_id: Long | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a request using either the order-number or legacy positional shape."""
+
+        names = ("page_no", "page_size", "type", "order_no", "create_time", "member_card_id")
+        legacy_names = ("page_no", "page_size", "type", "create_time", "member_card_id")
+        if len(args) > len(names):
+            raise TypeError(f"WalletTransactionRequest expected at most {len(names)} arguments")
+
+        if len(args) == len(names) or (
+            len(args) >= 4
+            and isinstance(args[3], str)
+        ) or (
+            len(args) == 5
+            and isinstance(args[4], (list, tuple))
+        ):
+            positional_names = names
+        else:
+            positional_names = legacy_names
+
+        values = {name: None for name in names}
+        for name, value in zip(positional_names, args):
+            values[name] = value
+        unknown = set(kwargs) - set(names)
+        if unknown:
+            unexpected = next(iter(sorted(unknown)))
+            raise TypeError(f"WalletTransactionRequest got an unexpected keyword argument {unexpected!r}")
+        for name, value in kwargs.items():
+            if name in positional_names[: len(args)]:
+                raise TypeError(f"WalletTransactionRequest got multiple values for argument {name!r}")
+            values[name] = value
+
+        if values["create_time"] is not None:
+            values["create_time"] = list(values["create_time"])
+        for name in names:
+            object.__setattr__(self, name, values[name])
 
 
 @dataclass(frozen=True, slots=True)
@@ -1066,6 +1103,28 @@ class SharedAccountOpenStatusWebhook:
 
 
 @dataclass(frozen=True, slots=True)
+class WalletTransactionWebhook:
+    """Payload for the WALLET_TRANSACTIONS webhook event."""
+
+    transaction_no: Long | None = None
+    member_no: Long | None = None
+    wallet_no: Long | None = None
+    order_no: str | None = None
+    type: int | None = None
+    direction: int | None = None
+    amount: Decimal | None = None
+    fee: Decimal | None = None
+    currency: str | None = None
+    before_balance: Decimal | None = None
+    after_balance: Decimal | None = None
+    status: int | None = None
+    remark: str | None = None
+    create_time: datetime | None = None
+    member_card_id: Long | None = None
+    card_number: str | None = None
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class RechargeCardTransferStatusWebhook:
     """Payload for rechargeable-card funding, withdrawal, or limit webhooks."""
 
@@ -1076,9 +1135,98 @@ class RechargeCardTransferStatusWebhook:
     amount: Decimal | None = None
     currency_code: str | None = None
     balance: Decimal | None = None
+    total_limit: Decimal | None = None
+    daily_limit: Decimal | None = None
+    month_limit: Decimal | None = None
     status: str | None = None
     message: str | None = None
     update_time: datetime | None = None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a webhook using either the current or a backward-compatible shape."""
+
+        names = (
+            "member_card_operation_record_id",
+            "member_card_id",
+            "card_type",
+            "operation_type",
+            "amount",
+            "currency_code",
+            "balance",
+            "total_limit",
+            "daily_limit",
+            "month_limit",
+            "status",
+            "message",
+            "update_time",
+        )
+        legacy_names = (
+            "member_card_operation_record_id",
+            "member_card_id",
+            "card_type",
+            "operation_type",
+            "amount",
+            "currency_code",
+            "balance",
+            "status",
+            "message",
+            "update_time",
+        )
+        total_limit_names = (
+            "member_card_operation_record_id",
+            "member_card_id",
+            "card_type",
+            "operation_type",
+            "amount",
+            "currency_code",
+            "balance",
+            "total_limit",
+            "status",
+            "message",
+            "update_time",
+        )
+        if len(args) > len(names):
+            raise TypeError(f"RechargeCardTransferStatusWebhook expected at most {len(names)} arguments")
+
+        numeric_tail = args[7:10]
+        numeric_or_none_tail = all(
+            value is None
+            or (isinstance(value, (int, float, Decimal)) and not isinstance(value, bool))
+            for value in numeric_tail
+        )
+        if len(args) >= 12 or (
+            len(args) == 10
+            and numeric_or_none_tail
+            and any(value is not None for value in numeric_tail)
+        ):
+            positional_names = names
+        elif len(args) == 11 or (
+            len(args) in {8, 9}
+            and isinstance(args[7], (int, float, Decimal))
+            and not isinstance(args[7], bool)
+        ):
+            positional_names = total_limit_names
+        else:
+            positional_names = legacy_names
+
+        values = {name: None for name in names}
+        for name, value in zip(positional_names, args):
+            values[name] = value
+        unknown = set(kwargs) - set(names)
+        if unknown:
+            unexpected = next(iter(sorted(unknown)))
+            raise TypeError(
+                f"RechargeCardTransferStatusWebhook got an unexpected keyword argument {unexpected!r}"
+            )
+        for name, value in kwargs.items():
+            if name in positional_names[: len(args)]:
+                raise TypeError(
+                    f"RechargeCardTransferStatusWebhook got multiple values for argument {name!r}"
+                )
+            values[name] = value
+
+        for name in names:
+            object.__setattr__(self, name, values[name])
 
 
 @dataclass(frozen=True, slots=True)

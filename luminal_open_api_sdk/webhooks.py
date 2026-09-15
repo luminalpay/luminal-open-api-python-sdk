@@ -18,6 +18,7 @@ from .models import (
     RechargeCardTransferStatusWebhook,
     SharedAccountOpenStatusWebhook,
     TransactionWebhook,
+    WalletTransactionWebhook,
 )
 from .codec import decode_value
 
@@ -28,6 +29,7 @@ _DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 class WebhookEventType(str, Enum):
     """Supported values of the webhook ``event`` header."""
 
+    WALLET_TRANSACTIONS = "WALLET_TRANSACTIONS"
     CARD_TRANSACTIONS = "CARD_TRANSACTIONS"
     CARD_SETTLE_STATUS = "CARD_SETTLE_STATUS"
     CARD_STATUS = "CARD_STATUS"
@@ -198,6 +200,8 @@ class WebhookVerifier:
 
 
 def _payload_type(event_type: WebhookEventType) -> type[Any]:
+    if event_type is WebhookEventType.WALLET_TRANSACTIONS:
+        return WalletTransactionWebhook
     if event_type is WebhookEventType.CARD_OPEN_STATUS:
         return CardOpenStatusWebhook
     if event_type is WebhookEventType.CARD_STATUS:

@@ -212,7 +212,7 @@ class TransactionsApi:
         self._transport = transport
 
     def list(self, request: WalletTransactionRequest) -> PageResult[WalletTransactionResponse] | None:
-        """List wallet transactions for the current member."""
+        """List wallet transactions with type, order-number, time, and card filters."""
         return self._transport.post(
             self._PATH + "/list",
             _require_request(request),

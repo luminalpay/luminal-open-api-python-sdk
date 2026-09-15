@@ -24,7 +24,7 @@ class CardPoolSharedAccountSandboxOpenApiIntegrationTest(
     SandboxCardsApiTest,
     SandboxCardGroupsApiTest,
 ):
-    """Run the complete shared-card flow after selecting a card pool."""
+    """Run the complete shared-card flow, including wallet and limit webhook shapes."""
 
     def test_list_card_pools_from_sandbox(self) -> None:
         selected_pool = self._selected_card_pool()

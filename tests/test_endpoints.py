@@ -95,13 +95,15 @@ class AccountsListEndpointTest(unittest.TestCase):
 class TransactionsListEndpointTest(unittest.TestCase):
     def test_list_contract(self) -> None:
         client, opener = client_for({"total": 1, "list": [{"orderNo": "O1"}]})
-        result = client.transactions.list(WalletTransactionRequest(page_no=1, page_size=10))
+        result = client.transactions.list(
+            WalletTransactionRequest(page_no=1, page_size=10, order_no="ORD-20260701-01")
+        )
         self.assertEqual("O1", result.list[0].order_no)
         assert_request_contract(
             self,
             opener,
             "/open-api/v1/transactions/list",
-            '{"pageNo":1,"pageSize":10}',
+            '{"orderNo":"ORD-20260701-01","pageNo":1,"pageSize":10}',
         )
 
 

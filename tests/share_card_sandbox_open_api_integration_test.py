@@ -35,6 +35,9 @@ from luminal_open_api_sdk import (
     LuminalApiException,
     LuminalOpenApiClient,
     MemberCardPageRequest,
+    RechargeCardOperationRecordRequest,
+    RechargeCardOperationRecordResponse,
+    RechargeCardTransferStatusWebhook,
     SharedAccountBalanceRequest,
     SharedAccountGetRequest,
     SharedAccountOpenStatusWebhook,
@@ -43,6 +46,7 @@ from luminal_open_api_sdk import (
     TransactionWebhook,
     WalletInfoRequest,
     WalletTransactionRequest,
+    WalletTransactionWebhook,
     WebhookEventType,
     WebhookVerificationException,
     read_private_key,
@@ -68,8 +72,10 @@ _WEBHOOK_LOG_INTERVAL_SECONDS = 10.0
 _WEBHOOK_CONDITION = threading.Condition()
 _CARD_OPEN_WEBHOOKS: dict[str, CardOpenStatusWebhook] = {}
 _CARD_STATUS_WEBHOOKS: dict[str, CardStatusWebhook] = {}
+_LIMIT_WEBHOOKS: dict[str, RechargeCardTransferStatusWebhook] = {}
 _SHARED_ACCOUNT_OPEN_WEBHOOKS: dict[str, SharedAccountOpenStatusWebhook] = {}
 _SHARED_ACCOUNT_TRANSACTION_WEBHOOKS: dict[str, TransactionWebhook] = {}
+_WALLET_TRANSACTION_EVENTS: list[WalletTransactionWebhook] = []
 _WEBHOOK_ERROR: Exception | None = None
 _WEBHOOK_SERVER: ThreadingHTTPServer | None = None
 _WEBHOOK_THREAD: threading.Thread | None = None
@@ -91,6 +97,7 @@ _DELETE_CARD_GROUP_CREATE_ATTEMPTED = False
 _DELETE_CARD_GROUP_CREATE_ERROR: LuminalApiException | None = None
 _CACHED_CARD_ID: Any = None
 _CACHED_ISSUE_TASK_ID: int | None = None
+_CACHED_LIMIT_OPERATION_ID: int | None = None
 _CACHED_ISSUE_ERROR: Exception | None = None
 _ISSUE_ATTEMPTED = False
 _CARD_POOL_FLOW = False
@@ -133,6 +140,10 @@ def _webhook_payload_type(event_type: WebhookEventType) -> type[Any]:
         return CardOpenStatusWebhook
     if event_type is WebhookEventType.CARD_STATUS:
         return CardStatusWebhook
+    if event_type is WebhookEventType.WALLET_TRANSACTIONS:
+        return WalletTransactionWebhook
+    if event_type is WebhookEventType.CARD_LIMIT_STATUS:
+        return RechargeCardTransferStatusWebhook
     if event_type is WebhookEventType.SHARED_ACCOUNT_OPEN_STATUS:
         return SharedAccountOpenStatusWebhook
     return TransactionWebhook
@@ -148,6 +159,16 @@ def _record_webhook(event_type: WebhookEventType, payload: Any) -> None:
                 _CARD_OPEN_WEBHOOKS[str(payload.card_apply_task_id)] = payload
         elif event_type is WebhookEventType.CARD_STATUS:
             _CARD_STATUS_WEBHOOKS[str(payload.member_card_id)] = payload
+        elif event_type is WebhookEventType.CARD_LIMIT_STATUS:
+            if payload.status in {"SUCCESS", "FAIL"}:
+                _LIMIT_WEBHOOKS[str(payload.member_card_operation_record_id)] = payload
+        elif event_type is WebhookEventType.WALLET_TRANSACTIONS:
+            _WALLET_TRANSACTION_EVENTS.append(payload)
+            _LOGGER.info(
+                "Recorded wallet transaction webhook transactionNo=%s orderNo=%s",
+                payload.transaction_no,
+                payload.order_no,
+            )
         elif event_type is WebhookEventType.SHARED_ACCOUNT_OPEN_STATUS:
             if payload.status in {"SUCCESS", "FAIL"}:
                 _SHARED_ACCOUNT_OPEN_WEBHOOKS[str(payload.member_shared_account_id)] = payload
@@ -182,6 +203,8 @@ class _WebhookRequestHandler(BaseHTTPRequestHandler):
         if event_type not in {
             WebhookEventType.CARD_OPEN_STATUS,
             WebhookEventType.CARD_STATUS,
+            WebhookEventType.CARD_LIMIT_STATUS,
+            WebhookEventType.WALLET_TRANSACTIONS,
             WebhookEventType.SHARED_ACCOUNT_OPEN_STATUS,
             WebhookEventType.SHARE_ACCOUNT_FUND_TRANSACTIONS,
         }:
@@ -212,6 +235,7 @@ class _WebhookRequestHandler(BaseHTTPRequestHandler):
                 SANDBOX_WEBHOOK_PUBLIC_KEY_PEM,
             ).payload
             _record_webhook(event_type, payload)
+            _LOGGER.info("Received webhook event=%s eventId=%s", event_type, event_id)
         except WebhookVerificationException as exc:
             _record_webhook_error(exc)
             self._respond(401)
@@ -243,13 +267,16 @@ def reset_flow_state() -> None:
     global _SHARED_ACCOUNT_CREATE_ATTEMPTED, _SHARED_ACCOUNT_CREATE_ERROR
     global _CACHED_CARD_GROUP, _CARD_GROUP_CREATE_ATTEMPTED, _CARD_GROUP_CREATE_ERROR
     global _CACHED_DELETE_CARD_GROUP, _DELETE_CARD_GROUP_CREATE_ATTEMPTED, _DELETE_CARD_GROUP_CREATE_ERROR
-    global _CACHED_CARD_ID, _CACHED_ISSUE_TASK_ID, _CACHED_ISSUE_ERROR, _ISSUE_ATTEMPTED, _CARD_POOL_FLOW
+    global _CACHED_CARD_ID, _CACHED_ISSUE_TASK_ID, _CACHED_LIMIT_OPERATION_ID
+    global _CACHED_ISSUE_ERROR, _ISSUE_ATTEMPTED, _CARD_POOL_FLOW
 
     with _WEBHOOK_CONDITION:
         _CARD_OPEN_WEBHOOKS.clear()
         _CARD_STATUS_WEBHOOKS.clear()
+        _LIMIT_WEBHOOKS.clear()
         _SHARED_ACCOUNT_OPEN_WEBHOOKS.clear()
         _SHARED_ACCOUNT_TRANSACTION_WEBHOOKS.clear()
+        _WALLET_TRANSACTION_EVENTS.clear()
         _WEBHOOK_ERROR = None
         _WEBHOOK_CONDITION.notify_all()
 
@@ -271,6 +298,7 @@ def reset_flow_state() -> None:
     _DELETE_CARD_GROUP_CREATE_ERROR = None
     _CACHED_CARD_ID = None
     _CACHED_ISSUE_TASK_ID = None
+    _CACHED_LIMIT_OPERATION_ID = None
     _CACHED_ISSUE_ERROR = None
     _ISSUE_ATTEMPTED = False
     _CARD_POOL_FLOW = False
@@ -584,6 +612,47 @@ class _SandboxIntegrationTestCase(unittest.TestCase):
             self.assertIsNotNone(transaction, "shared-account transaction fallback returned no matching row")
             status = transaction.status
         self.assertEqual("SUCCESS", status, f"shared-account transaction finished with status {status}")
+
+    def _await_shared_card_limit(
+        self, operation_id: Any, card_id: Any
+    ) -> RechargeCardOperationRecordResponse:
+        try:
+            webhook = _await_webhook(
+                _LIMIT_WEBHOOKS,
+                operation_id,
+                f"CARD_LIMIT_STATUS operationRecordId={operation_id}",
+            )
+        except TimeoutError:
+            result = self._authenticated_client().cards.operation_record(
+                RechargeCardOperationRecordRequest(operation_id)
+            )
+            self.assertIsNotNone(result, "Limit operation record is missing")
+            self._validate_shared_card_limit(operation_id, card_id, result)
+            return result
+
+        self._validate_shared_card_limit(operation_id, card_id, webhook)
+        self.assertIsNotNone(webhook.total_limit, "Shared-card limit webhook totalLimit is missing")
+        self.assertIsNone(webhook.daily_limit, "Shared-card limit webhook must not include dailyLimit")
+        self.assertIsNone(webhook.month_limit, "Shared-card limit webhook must not include monthLimit")
+        return RechargeCardOperationRecordResponse(
+            member_card_operation_record_id=webhook.member_card_operation_record_id,
+            member_card_id=webhook.member_card_id,
+            card_type=webhook.card_type,
+            operation_type=webhook.operation_type,
+            amount=webhook.amount,
+            currency_code=webhook.currency_code,
+            balance=webhook.balance,
+            status=webhook.status,
+            message=webhook.message,
+            update_time=None,
+        )
+
+    def _validate_shared_card_limit(self, operation_id: Any, card_id: Any, actual: Any) -> None:
+        self.assertEqual(str(operation_id), str(actual.member_card_operation_record_id))
+        self.assertEqual(str(card_id), str(actual.member_card_id))
+        self.assertEqual(SHARED_CARD_TYPE, str(actual.card_type).upper())
+        self.assertEqual("MODIFY_LIMITS", str(actual.operation_type).upper())
+        self.assertNotEqual("FAIL", str(actual.status).upper(), getattr(actual, "message", None))
 
     def _await_card_status(self, card_id: Any, expected: str) -> None:
         try:
@@ -1122,10 +1191,13 @@ YSl1QnrMvJj2mvDWk5nntw==
         self._run_mutations()
         card = self._first_active_card()
         try:
-            result = self._authenticated_client().cards.modify_limit(
+            global _CACHED_LIMIT_OPERATION_ID
+            _CACHED_LIMIT_OPERATION_ID = self._authenticated_client().cards.modify_limit_async(
                 CardLimitUpdateRequest(member_card_id=card.member_card_id, total_limit=card.total_limit + Decimal("1"))
             )
-            self.assertIsInstance(result, bool)
+            self.assertTrue(_CACHED_LIMIT_OPERATION_ID)
+            result = self._await_shared_card_limit(_CACHED_LIMIT_OPERATION_ID, card.member_card_id)
+            self.assertEqual("SUCCESS", str(result.status).upper())
         except LuminalApiException as exc:
             self.assertIn("modify limits", str(exc).lower())
 
